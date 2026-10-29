@@ -227,7 +227,7 @@ daily_stock_analysis/
 
 ### 5. 完成！
 
-默认每个工作日 **18:00（北京时间）** 自动执行。
+默认美国东部时间周一至周五 **18:30（America/New_York）** 自动执行，香港时间次日 **06:30（夏令时）/ 07:30（冬令时）**；节假日继续由交易日检查跳过。
 
 ---
 
@@ -839,23 +839,23 @@ OpenD 默认地址为 `127.0.0.1:11111`，可用 `FUTU_OPEND_HOST` / `FUTU_OPEND
 
 ### GitHub Actions 定时
 
-编辑 `.github/workflows/00-daily-analysis.yml`:
+工作流使用 GitHub 原生带时区调度，合入默认分支后生效：
 
-```yaml
-schedule:
-  # UTC 时间，北京时间 = UTC + 8
-  - cron: '0 10 * * 1-5'   # 周一到周五 18:00（北京时间）
-```
+~~~yaml
+on:
+  schedule:
+    - cron: '30 18 * * 1-5'
+      timezone: "America/New_York"
+~~~
 
-常用时间对照：
+| 美国东部时间 | 香港次日时间 |
+|---|---|
+| 18:30 EDT（夏令时） | 06:30 |
+| 18:30 EST（冬令时） | 07:30 |
 
-| 北京时间 | UTC cron 表达式 |
-|---------|----------------|
-| 09:30 | `'30 1 * * 1-5'` |
-| 12:00 | `'0 4 * * 1-5'` |
-| 15:00 | `'0 7 * * 1-5'` |
-| 18:00 | `'0 10 * * 1-5'` |
-| 21:00 | `'0 13 * * 1-5'` |
+Actions 未配置时默认 REPORT_TYPE=full、MARKET_REVIEW_REGION=us、REPORT_LANGUAGE=zh；仍按 Variables → Secrets → 默认值读取，不覆盖显式配置。股票池、模型、数据源、交易日检查和通知配置保持原有入口。本地 / Docker 的应用默认值与调度不变。
+
+启用暂停工作流、手动运行、下载 analysis-reports-*、固定 reports/latest/ 路径、公开 JSON 字段及数据质量核验，见 [美股日报与外部读取](us-daily-analysis.md)。工作日触发不等于交易日，GitHub 排队也可能延迟执行。
 
 #### GitHub Actions 非交易日手动运行（Issue #461 / #466）
 
