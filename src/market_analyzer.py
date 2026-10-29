@@ -1198,14 +1198,7 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
                 )
                 review = f"{review.rstrip()}\n\n{fallback_heading}\n{sector_block}\n"
 
-        disclosure = self._build_us_quote_disclosure(overview)
-        if disclosure and disclosure not in review:
-            if review.startswith("#"):
-                heading, _, body = review.partition("\n")
-                review = heading + "\n\n" + disclosure + "\n\n" + body.lstrip("\n")
-            else:
-                review = disclosure + "\n\n" + review
-        return review
+        return self._with_us_quote_disclosure(review, overview)
 
     @staticmethod
     def _insert_after_section(text: str, heading_pattern: str, block: str) -> str:
@@ -1378,6 +1371,16 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
         if not reasons:
             reasons.append("limited structured breadth data; using available market inputs")
         return reasons[:4]
+
+    def _with_us_quote_disclosure(self, review: str, overview: MarketOverview) -> str:
+        disclosure = self._build_us_quote_disclosure(overview)
+        if disclosure and disclosure not in review:
+            if review.startswith("#"):
+                heading, _, body = review.partition("\n")
+                review = heading + "\n\n" + disclosure + "\n\n" + body.lstrip("\n")
+            else:
+                review = disclosure + "\n\n" + review
+        return review
 
     def _build_us_quote_disclosure(self, overview: MarketOverview) -> str:
         """Keep index bar dates and unknown quote times visible in every report path."""
@@ -2045,7 +2048,7 @@ Market conditions can change quickly. The data above is for reference only and d
 ---
 *Review Time: {datetime.now().strftime('%H:%M')}*
 """
-            return report
+            return self._with_us_quote_disclosure(report, overview)
 
         market_labels = {"cn": "A股", "us": "美股", "hk": "港股", "jp": "日股", "kr": "韩股"}
         market_label = market_labels.get(self.region, "A股")
