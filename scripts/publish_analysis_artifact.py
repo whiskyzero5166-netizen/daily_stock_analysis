@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Publish run-scoped stable report aliases and reject incomplete green runs.
+"""Publish run-scoped report aliases and validate explicit partial outcomes.
 
 This script reads outputs only. It never starts analysis, sends notifications,
 loads portfolio snapshots, or copies the process environment into artifacts.
@@ -94,15 +94,27 @@ def publish_reports(reports_dir=None, env=None):
                     records = summary.get("stocks") or []
                     if set(requested) != set(codes):
                         issues.append("stock_universe_mismatch")
-                    if (summary.get("status") != "complete" or summary.get("failed_codes")
-                            or set(analyzed) != set(codes) or len(analyzed) != len(codes)
-                            or summary.get("counts") != {"requested": len(codes), "analyzed": len(codes), "failed": 0}
-                            or len(records) != len(codes) or {item.get("code") for item in records} != set(codes)
-                            or any(item.get("status") != "analyzed" for item in records)):
+                    failed = summary.get("failed_codes") or []
+                    expected_status = "complete" if not failed else "partial" if analyzed else "failed"
+                    requested_set, analyzed_set, failed_set = set(requested), set(analyzed), set(failed)
+                    record_codes = [item.get("code") for item in records]
+                    if (summary.get("status") != expected_status
+                            or len(requested_set) != len(requested) or len(analyzed_set) != len(analyzed)
+                            or len(failed_set) != len(failed) or analyzed_set & failed_set
+                            or analyzed_set | failed_set != requested_set
+                            or summary.get("counts") != {"requested": len(requested), "analyzed": len(analyzed), "failed": len(failed)}
+                            or len(records) != len(requested) or set(record_codes) != requested_set
+                            or any(item.get("status") != ("analyzed" if item.get("code") in analyzed_set else "failed") for item in records)
+                            or any(item.get("score") is not None for item in records if item.get("code") in failed_set)
+                            or any(item.get("failure_reason") not in {"rate_limited", "provider_unavailable", "timeout", "analysis_failed", "no_result"}
+                                   for item in records if item.get("code") in failed_set)):
+                        issues.append("stock_summary_inconsistent")
+                    elif failed:
                         issues.append("stock_coverage_incomplete")
             if review_expected and market_report is None:
                 issues.append("market_review_missing")
-            run["status"] = "complete" if not issues else "partial" if run["files"] else "failed"
+            no_success = bool(codes) and (run.get("counts") or {}).get("analyzed", 0) == 0
+            run["status"] = "failed" if no_success else "complete" if not issues else "partial" if run["files"] else "failed"
     except (OSError, ValueError, TypeError, KeyError):
         issues.append("report_validation_error")
     (latest / "run.json").write_text(json.dumps(run, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -114,6 +126,18 @@ def publish_reports(reports_dir=None, env=None):
     return run
 
 
+def report_exit_code(outcome):
+    """Provider failures are explicit partial results; structural failures remain errors."""
+    if outcome["status"] in {"complete", "skipped"}:
+        return 0
+    counts = outcome.get("counts") or {}
+    if (outcome["status"] == "partial" and counts.get("analyzed", 0) > 0
+            and counts.get("failed", 0) > 0
+            and counts.get("requested") == counts.get("analyzed", 0) + counts.get("failed", 0)
+            and set(outcome.get("issues") or []) == {"stock_coverage_incomplete"}):
+        return 0
+    return 1
+
+
 if __name__ == "__main__":
-    outcome = publish_reports()
-    raise SystemExit(0 if outcome["status"] in {"complete", "skipped"} else 1)
+    raise SystemExit(report_exit_code(publish_reports()))
