@@ -1110,9 +1110,8 @@ class StockAnalysisPipeline:
                 if enhanced.get('yesterday') and isinstance(enhanced['yesterday'], dict):
                     yesterday_close = enhanced['yesterday'].get('close')
                 orig_today = enhanced.get('today') or {}
-                market_today = get_market_now(
-                    get_market_for_stock(normalize_stock_code(enhanced.get('code', '')))
-                ).date().isoformat()
+                quote_market = get_market_for_stock(normalize_stock_code(enhanced.get('code', '')))
+                market_today = get_market_now(quote_market).date().isoformat()
                 source = getattr(realtime_quote, 'source', None)
                 source_name = getattr(source, 'value', source)
                 source_name = str(source_name) if source_name is not None else 'unknown'
@@ -1127,12 +1126,13 @@ class StockAnalysisPipeline:
                 fetched_at = getattr(realtime_quote, 'fetched_at', None)
                 provider_timestamp = getattr(realtime_quote, 'provider_timestamp', None)
                 # A fetch at 18:30 is not proof that the quote belongs to today.
-                market_today = orig_today.get('date') or enhanced.get('date') or 'unknown'
-                if isinstance(provider_timestamp, str):
+                if quote_market == 'us':
+                    market_today = orig_today.get('date') or enhanced.get('date') or 'unknown'
+                if quote_market == 'us' and isinstance(provider_timestamp, str):
                     try:
                         quote_time = datetime.fromisoformat(provider_timestamp.replace('Z', '+00:00'))
                         if quote_time.tzinfo is not None:
-                            market_tz = get_market_now(get_market_for_stock(enhanced.get('code', ''))).tzinfo
+                            market_tz = get_market_now(quote_market).tzinfo
                             market_today = quote_time.astimezone(market_tz).date().isoformat()
                     except (ValueError, TypeError):
                         pass
@@ -1191,6 +1191,8 @@ class StockAnalysisPipeline:
                 )
                 enhanced['date'] = market_today
                 reference_close = getattr(realtime_quote, 'pre_close', None)
+                if reference_close is None and quote_market != 'us':
+                    reference_close = yesterday_close
                 enhanced.pop('price_change_ratio', None)
                 if reference_close is not None:
                     try:
