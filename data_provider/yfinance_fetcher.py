@@ -412,14 +412,16 @@ class YfinanceFetcher(BaseFetcher):
         }
         if get_us_index_yf_symbol(return_code)[0]:
             # history() supplies a bar date, not an exchange quote timestamp.
+            bar_stamp = hist.index[-1]
+            data_date = bar_stamp.strftime('%Y-%m-%d') if hasattr(bar_stamp, 'strftime') else None
             data.update({
-                'data_date': hist.index[-1].strftime('%Y-%m-%d'),
+                'data_date': data_date,
                 'source': 'yfinance',
                 'quote_session': 'daily',
                 'provider_timestamp': None,
                 'fetched_at': datetime.now(timezone.utc).isoformat(),
                 'data_quality': 'partial',
-                'missing_fields': ['provider_timestamp', 'amount'],
+                'missing_fields': ['provider_timestamp', 'amount'] + (['data_date'] if data_date is None else []),
                 'unit': 'points',
             })
         return data
