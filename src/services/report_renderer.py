@@ -385,7 +385,13 @@ def write_analysis_summary(report_path, results, requested_codes, failures):
             lines += ["", "| Failed code | Reason |", "|---|---|"]
     lines += [f"| {code} | {failures.get(code, 'no_result')} |" for code in failed]
     content = path.read_text(encoding="utf-8")
-    path.write_text("\n".join(lines) + "\n\n---\n\n" + content, encoding="utf-8")
+    coverage = "\n".join(lines) + "\n\n---\n\n"
+    if content.startswith("# "):
+        heading, _, body = content.partition("\n")
+        content = heading + "\n\n" + coverage + body.lstrip("\n")
+    else:
+        content = coverage + content
+    path.write_text(content, encoding="utf-8")
     path.with_suffix(".json").write_text(json.dumps(summary, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8")
     return summary
 
