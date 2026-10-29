@@ -384,7 +384,8 @@ class AgentSkillsEndpointTestCase(unittest.TestCase):
             skills=[],
             context={"skills": ["old_skill"], "strategies": ["older_strategy"]},
         )
-        with tempfile.TemporaryDirectory() as directory:
+        # Isolate this real SQLite fixture from singleton state left by other tests.
+        with patch.object(DatabaseManager, "_instance", None), tempfile.TemporaryDirectory() as directory:
             db = DatabaseManager(db_url=f"sqlite:///{directory}/chat.db")
             try:
                 with patch("api.v1.endpoints.agent.get_config", return_value=config), patch(
