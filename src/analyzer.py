@@ -4354,13 +4354,13 @@ Output strictly in the following JSON format. This is a complete Decision Dashbo
         hide_regular_session_ohlc = _should_hide_regular_session_ohlc(context)
         realtime_overlay_quote = hide_regular_session_ohlc and _today_has_realtime_overlay(today)
         if english:
-            price_unit = f" {currency}"
+            price_unit = "" if currency in {"CNY", "RMB", "CNH"} else f" {currency}"
             pct_chg_label = "Realtime Change" if realtime_overlay_quote else "Change"
             volume_label = "Realtime Volume" if realtime_overlay_quote else "Volume"
             amount_label = "Realtime Turnover" if realtime_overlay_quote else "Turnover"
             open_label, high_label, low_label = "Open", "High", "Low"
         else:
-            price_unit = f" {currency}"
+            price_unit = " 元" if currency in {"CNY", "RMB", "CNH"} else f" {currency}"
             pct_chg_label = "实时涨跌幅" if realtime_overlay_quote else "涨跌幅"
             volume_label = "实时成交量" if realtime_overlay_quote else "成交量"
             amount_label = "实时成交额" if realtime_overlay_quote else "成交额"
@@ -4412,7 +4412,7 @@ Output strictly in the following JSON format. This is a complete Decision Dashbo
 """
         prompt += (
             f"\nQuote currency: {currency}. Use this ISO currency for all stock price levels; "
-            "do not label USD prices as CNY or 元. Quote timestamps and fetch times are distinct; "
+            "do not label USD prices as Chinese yuan. Quote timestamps and fetch times are distinct; "
             "missing quote times must be disclosed. Keep regular-session and extended-session prices separate.\n"
         )
         prompt += format_market_phase_prompt_section(
