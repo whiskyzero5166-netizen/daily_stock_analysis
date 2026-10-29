@@ -3637,7 +3637,12 @@ class StockAnalysisPipeline:
         if not dry_run:
             report_path = self._save_local_report(results, report_type)
             if report_path:
-                write_analysis_summary(report_path, results, stock_codes, failures)
+                try:
+                    write_analysis_summary(report_path, results, stock_codes, failures)
+                except (OSError, ValueError, TypeError) as exc:
+                    # Keep report/notification delivery; the artifact gate rejects missing JSON.
+                    self._last_local_report_error = "public_summary_save_failed"
+                    logger.error("公开报告摘要保存失败 (%s)，继续现有通知流程", type(exc).__name__)
 
         # 发送通知（单股推送模式下跳过汇总推送，避免重复）
         if results and send_notification and not dry_run:
