@@ -2003,6 +2003,8 @@ Output the report content directly, no extra commentary.
     
     def _generate_template_review(self, overview: MarketOverview, news: List) -> str:
         """使用模板生成复盘报告（无大模型时的备选方案）"""
+        us_summary_en = ("The supplied completed daily bars" if overview.date_basis == "data_date" else "Available market information")
+        us_summary_zh = "所列已完成日线对应的" if overview.date_basis == "data_date" else "可用信息对应的"
         template_language = self._get_template_review_language()
         mood_code = self.profile.mood_index_code
         # 根据 mood_index_code 查找对应指数
@@ -2069,7 +2071,7 @@ Output the report content directly, no extra commentary.
             report = f"""## {overview.date} {market_name}
 
 ### 1. Market Summary
-{('The supplied completed daily bars' if self.region == 'us' else "Today's " + self._get_market_scope_name(template_language))} showed **{market_mood}**.
+{(us_summary_en if self.region == 'us' else "Today's " + self._get_market_scope_name(template_language))} showed **{market_mood}**.
 
 ### 2. Major Indices
 {indices_text or "- No index data available"}
@@ -2126,7 +2128,7 @@ Market conditions can change quickly. The data above is for reference only and d
         )
         return f"""## {overview.date} 大盘复盘
 
-> {('所列已完成日线对应的' if self.region == 'us' else '今日')}{market_label}市场整体呈现**{market_mood}**态势，优先观察{summary_focus}。
+> {(us_summary_zh if self.region == 'us' else '今日')}{market_label}市场整体呈现**{market_mood}**态势，优先观察{summary_focus}。
 
 ### 一、盘面总览
 {market_summary_block}
