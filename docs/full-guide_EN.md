@@ -799,6 +799,8 @@ Unconfigured Actions defaults are REPORT_TYPE=full, MARKET_REVIEW_REGION=us and 
 
 See the [US daily report runbook](us-daily-analysis.md) (Chinese) for enabling a paused workflow, manual modes, downloading analysis-reports-* artifacts, stable reports/latest/ paths, the public JSON schema, data-quality checks and rollback. A weekday trigger is still filtered by the exchange calendar, and GitHub queue delays can postpone execution.
 
+US index reviews retain the daily-bar date separately from the report generation time. The title uses a shared, known index date; missing or mixed dates are disclosed. A daily bar does not supply a live quote timestamp, so that timestamp remains unknown. Dated artifact filenames still use the generation date and may be one day later during a manual premarket test.
+
 ### Local Scheduled Tasks
 
 ```bash
