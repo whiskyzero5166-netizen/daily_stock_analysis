@@ -274,3 +274,115 @@ def test_report_contract_evidence(tmp_path):
                 latest = tmp_path / name / "latest"
                 handle.write(f"## {name}\n\n~~~json\n" + (latest / "run.json").read_text(encoding="utf-8") + "~~~\n\n")
                 handle.write(f"<details><summary>{name} synthetic Markdown report</summary>\n\n" + (latest / "report.md").read_text(encoding="utf-8") + "\n</details>\n\n")
+
+
+def market_timing_fixture(language="zh", dates=("2026-10-28",)):
+    from src.core.market_profile import get_profile
+    from src.core.market_strategy import get_market_strategy_blueprint
+    from src.market_analyzer import MarketAnalyzer
+
+    analyzer = MarketAnalyzer.__new__(MarketAnalyzer)
+    analyzer.region = "us"
+    analyzer.config = SimpleNamespace(report_language=language, market_review_color_scheme="green_up")
+    analyzer.profile = get_profile("us")
+    analyzer.strategy = get_market_strategy_blueprint("us")
+    analyzer.data_manager = MagicMock()
+    analyzer.data_manager.get_main_indices.return_value = [
+        {"code": "SPX" if i == 0 else "VIX", "name": "Synthetic index", "current": 110,
+         "change": 10, "change_pct": 10, "open": 101, "high": 112, "low": 99,
+         "prev_close": 100, "volume": 1000, "amount": 0, "amplitude": 13,
+         "data_date": date, "source": "yfinance", "quote_session": "daily",
+         "provider_timestamp": None, "fetched_at": "2026-10-29T12:15:00+00:00",
+         "data_quality": "partial", "missing_fields": ["provider_timestamp", "amount"], "unit": "points"}
+        for i, date in enumerate(dates)
+    ]
+    return analyzer
+
+
+class MarketTimingClock(datetime):
+    @classmethod
+    def now(cls, tz=None):
+        value = datetime(2026, 10, 29, 12, 15, tzinfo=timezone.utc)
+        return value.astimezone(tz) if tz is not None else value.replace(tzinfo=None)
+
+
+@pytest.mark.parametrize("dated", [True, False])
+def test_us_index_history_carries_bar_date_without_claiming_quote_timestamp(dated):
+    import pandas as pd
+
+    frame = pd.DataFrame([
+        {"Open": 100, "High": 102, "Low": 99, "Close": 100, "Volume": 1000},
+        {"Open": 101, "High": 112, "Low": 99, "Close": 110, "Volume": 1200},
+    ])
+    if dated:
+        frame.index = pd.to_datetime(["2026-10-27", "2026-10-28"])
+    yahoo = SimpleNamespace(Ticker=lambda symbol: SimpleNamespace(history=lambda **kwargs: frame))
+    rows = YfinanceFetcher()._get_us_main_indices(yahoo)
+    assert len(rows) == 4
+    for row in rows:
+        assert row["data_date"] == ("2026-10-28" if dated else None)
+        assert row["provider_timestamp"] is None and row["quote_session"] == "daily"
+        assert row["source"] == "yfinance" and row["unit"] == "points"
+        assert row["fetched_at"] and "provider_timestamp" in row["missing_fields"]
+
+
+def test_us_market_overview_uses_index_date_instead_of_premarket_generation_date():
+    analyzer = market_timing_fixture()
+    with patch("src.market_analyzer.datetime", MarketTimingClock):
+        overview = analyzer.get_market_overview()
+    assert overview.date == "2026-10-28" and overview.date_basis == "data_date"
+    assert overview.analysis_time == "2026-10-29T12:15:00+00:00"
+    payload = analyzer.build_market_review_payload(overview, [], "## Synthetic market review")
+    assert payload["date"] == "2026-10-28"
+    assert payload["indices"][0]["data_date"] == "2026-10-28"
+    assert payload["indices"][0]["provider_timestamp"] is None
+
+
+@pytest.mark.parametrize("dates", [(None,), ("2026-10-28", "2026-10-27")])
+def test_us_market_overview_does_not_infer_a_shared_date_from_missing_or_mixed_bars(dates):
+    analyzer = market_timing_fixture(dates=dates)
+    with patch("src.market_analyzer.datetime", MarketTimingClock):
+        overview = analyzer.get_market_overview()
+    assert overview.date == "2026-10-29" and overview.date_basis == "analysis_date"
+    assert "指数日期未确认" in analyzer._build_us_quote_disclosure(overview)
+
+
+@pytest.mark.parametrize("language", ["zh", "en"])
+def test_us_market_prompt_and_template_keep_bar_dates_source_and_time_limits(language):
+    analyzer = market_timing_fixture(language)
+    with patch("src.market_analyzer.datetime", MarketTimingClock):
+        overview = analyzer.get_market_overview()
+    prompt = analyzer._build_review_prompt(overview, [])
+    report = analyzer._generate_template_review(overview, [])
+    disclosure = analyzer._build_us_quote_disclosure(overview)
+    assert disclosure in prompt and disclosure in report
+    assert report.startswith("## 2026-10-28")
+    assert "2026-10-29T12:15:00+00:00" in report and "yfinance" in report
+    assert "行情时间 未知" in report if language == "zh" else "provider time unknown" in report
+    assert "禁止写成当日已经收涨/收跌" in prompt if language == "zh" else "Never describe the current calendar day as closed" in prompt
+    if language == "en":
+        assert "行情" not in report
+
+
+def test_us_market_llm_prose_without_expected_sections_still_discloses_timing():
+    analyzer = market_timing_fixture()
+    with patch("src.market_analyzer.datetime", MarketTimingClock):
+        overview = analyzer.get_market_overview()
+    prose = "## 2026-10-28 大盘复盘\n\n保留模型正文。"
+    report = analyzer._inject_data_into_review(prose, overview, [])
+    assert report.startswith("## 2026-10-28 大盘复盘\n")
+    assert "保留模型正文。" in report and "行情时间 未知" in report
+    assert report.count("### 行情时间与数据质量") == 1
+
+
+def test_us_market_report_visual_evidence():
+    analyzer = market_timing_fixture()
+    with patch("src.market_analyzer.datetime", MarketTimingClock):
+        overview = analyzer.get_market_overview()
+    report = analyzer._generate_template_review(overview, [])
+    summary_file = os.getenv("GITHUB_STEP_SUMMARY")
+    if summary_file:
+        with open(summary_file, "a", encoding="utf-8") as handle:
+            handle.write("\n# 美股大盘日期验收：合成日线\n\n10月29日盘前生成，指数日线为10月28日；仅合成数据。\n\n" + report + "\n")
+    assert "2026-10-28" in report and "2026-10-29T12:15:00+00:00" in report
+
