@@ -148,7 +148,14 @@ def test_heavy_ci_jobs_are_path_filtered_and_backend_tests_are_sharded() -> None
         "PYTEST_SPLITS": "3",
         "PYTEST_GROUP": "${{ matrix.shard }}",
         "PYTEST_FIRST_SHARD_OVERHEAD": "20",
+        "REPORT_EVIDENCE_DIR": "${{ runner.temp }}/report-contract-evidence",
     }
+
+    evidence = next(step for step in backend_tests_job["steps"] if step["name"] == "📎 Upload report contract evidence")
+    assert evidence["if"] == "always()"
+    assert evidence["with"]["path"] == shard_step["env"]["REPORT_EVIDENCE_DIR"] + "/"
+    assert evidence["with"]["retention-days"] == "30"
+    assert evidence["with"]["if-no-files-found"] == "ignore"
 
     requirements = _read(".github/requirements-ci.txt")
     ci_gate = _read("scripts/ci_gate.sh")
