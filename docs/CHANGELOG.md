@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [修复] 美股指数日线日期传递到大盘复盘标题、模型输入、模板及结构化载荷；单独披露生成时间、获取时间、未知行情时间与日线质量，覆盖盘前及缺失/混合日期的中英文回归。
 - [改进] 美股日报使用 America/New_York 工作日 18:30 原生时区调度，未配置的 Actions 默认 full/us/zh，保留手动模式、变量及 Secret 优先级、交易日检查和通知。
 - [修复] Yahoo 报价区分常规与盘前盘后时段，保留 provider 时间、币种和来源；行情表使用同一价格基准复算涨跌幅，缺失时间明确披露，默认与 Jinja 报告共用质量说明并修正美股价格字段的元标注。
 - [新功能] 保留 analysis-reports-* 与 30 天保存期，增加公开 JSON、完整股票池覆盖及失败分类、reports/latest/ 固定路径和运行身份验证，覆盖不足的运行不再误报完整成功。
