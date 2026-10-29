@@ -122,16 +122,31 @@ def test_actual_stock_list_shell_precedence(configured, inherited, expected):
 
 
 @pytest.mark.parametrize("code", ["MSFT", "SPX"])
-def test_yahoo_stock_and_index_use_matching_regular_prices_and_distinct_postmarket(code):
+@pytest.mark.parametrize("state,session", [("POST", "close"), ("REGULAR", "intraday")])
+def test_yahoo_stock_and_index_use_matching_regular_prices_and_distinct_postmarket(code, state, session):
     fast = SimpleNamespace(last_price=999, regular_market_previous_close=990, open=998, day_high=1000, day_low=997, last_volume=1000, market_cap=1000000)
-    info = {"shortName": "Synthetic fixture", "currency": "USD", "marketState": "POST", "regularMarketPrice": 110, "regularMarketPreviousClose": 100, "regularMarketOpen": 101, "regularMarketDayHigh": 112, "regularMarketDayLow": 99, "regularMarketVolume": 1000, "regularMarketTime": REGULAR_TIME, "postMarketPrice": 115, "postMarketTime": REGULAR_TIME + 7200}
+    info = {"shortName": "Synthetic fixture", "currency": "USD", "marketState": state, "regularMarketPrice": 110, "regularMarketPreviousClose": 100, "regularMarketOpen": 101, "regularMarketDayHigh": 112, "regularMarketDayLow": 99, "regularMarketVolume": 1000, "regularMarketTime": REGULAR_TIME, "postMarketPrice": 115 if state == "POST" else None, "postMarketTime": REGULAR_TIME + 7200}
     with patch("yfinance.Ticker", return_value=SimpleNamespace(fast_info=fast, info=info)):
         quote = YfinanceFetcher().get_realtime_quote(code)
     assert quote is not None and quote.source == RealtimeSource.YFINANCE
     assert (quote.price, quote.pre_close, quote.change_pct) == (110, 100, 10)
-    assert quote.provider_timestamp == "2026-10-28T20:00:00+00:00" and quote.quote_session == "close"
-    assert quote.extended_price == 115 and quote.extended_session == "postmarket"
-    assert quote.to_dict()["extended_timestamp"] == "2026-10-28T22:00:00+00:00"
+    assert quote.provider_timestamp == "2026-10-28T20:00:00+00:00" and quote.quote_session == session
+    if state == "POST":
+        assert quote.extended_price == 115 and quote.extended_session == "postmarket"
+        assert quote.to_dict()["extended_timestamp"] == "2026-10-28T22:00:00+00:00"
+    else:
+        assert quote.extended_price is None
+
+
+@pytest.mark.parametrize("code,language,unit", [("MSFT", "zh", " USD"), ("MSFT", "en", " USD"), ("600519", "zh", " 元"), ("600519", "en", "")])
+def test_price_prompt_currency_preserves_market_and_language_contracts(code, language, unit):
+    analyzer = GeminiAnalyzer.__new__(GeminiAnalyzer)
+    context = {"code": code, "stock_name": "Synthetic fixture", "date": "2026-10-28", "today": {"close": 110}}
+    with patch.object(analyzer, "_get_skill_prompt_sections", return_value=("", "", True)):
+        prompt = analyzer._format_prompt(context, "Synthetic fixture", report_language=language)
+    assert f" | 110{unit} |" in prompt
+    if code == "MSFT":
+        assert "110 元" not in prompt
 
 
 def test_untimed_yahoo_fallback_is_not_certified_as_realtime():
@@ -197,6 +212,7 @@ def test_summary_has_every_requested_symbol_and_excludes_private_payloads(tmp_pa
     summary = write_analysis_summary(path, [result], UNIVERSE, {code: "429 PRIVATE_ERROR_SENTINEL" for code in UNIVERSE if code != result.code})
     text = path.with_suffix(".json").read_text(encoding="utf-8")
     assert "PRIVATE_" not in text and "raw_response" not in text and "portfolio_context" not in text
+    assert path.read_text(encoding="utf-8").startswith("# Synthetic report\n")
     assert summary["counts"] == {"requested": 36, "analyzed": 1, "failed": 35}
     assert len(summary["stocks"]) == 36 and len(set(summary["requested_codes"])) == 36
     assert all(stock["failure_reason"] == "rate_limited" and stock["score"] is None for stock in summary["stocks"] if stock["status"] == "failed")
