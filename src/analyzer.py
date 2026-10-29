@@ -3602,6 +3602,22 @@ Output strictly in the following JSON format. This is a complete Decision Dashbo
             return result
         return result.text, result.model, result.usage
 
+    @staticmethod
+    def _is_llm_capacity_error(error: Exception) -> bool:
+        """Do not immediately repeat a request after explicit quota or outage errors."""
+        current = error
+        seen = set()
+        for _ in range(8):
+            if current is None or id(current) in seen:
+                break
+            seen.add(id(current))
+            if str(getattr(current, "status_code", "")) in {"429", "503"}:
+                return True
+            if re.search(r"\b(?:429|503)\b|RateLimitError|ServiceUnavailableError", f"{type(current).__name__}: {current}"):
+                return True
+            current = current.__cause__ or current.__context__
+        return False
+
     def _call_litellm_impl(
         self,
         prompt: str,
@@ -3643,7 +3659,7 @@ Output strictly in the following JSON format. This is a complete Decision Dashbo
         requested_timeout = generation_config.get("timeout")
 
         models_to_try = [config.litellm_model] + (config.litellm_fallback_models or [])
-        models_to_try = [m for m in models_to_try if m]
+        models_to_try = list(dict.fromkeys(m for m in models_to_try if m))
 
         use_channel_router = self._has_channel_config(config)
 
@@ -3768,6 +3784,8 @@ Output strictly in the following JSON format. This is a complete Decision Dashbo
                             progress_callback=stream_progress_callback,
                         )
                     except _LiteLLMStreamError as exc:
+                        if self._is_llm_capacity_error(exc):
+                            raise
                         safe_error = self._sanitize_litellm_exception_text(exc, config=config, model=model)
                         if exc.partial_received:
                             logger.warning(
@@ -3783,6 +3801,8 @@ Output strictly in the following JSON format. This is a complete Decision Dashbo
                             )
                         last_error = RuntimeError(f"{type(exc).__name__}: {safe_error}")
                     except Exception as exc:
+                        if self._is_llm_capacity_error(exc):
+                            raise
                         safe_error = self._sanitize_litellm_exception_text(exc, config=config, model=model)
                         logger.warning(
                             "[LiteLLM] %s stream request failed before first chunk, falling back to non-stream: %s",
@@ -4239,6 +4259,10 @@ Output strictly in the following JSON format. This is a complete Decision Dashbo
                 result.model_used = model_used
                 result.report_language = report_language
                 normalize_chip_structure_availability(result, context.get("chip"))
+
+                # Invalid JSON is a failed analysis, not a field-completion request.
+                if not result.success:
+                    break
 
                 # 内容完整性校验（可选）
                 if not config.report_integrity_enabled:
