@@ -10,12 +10,16 @@ Any expensive data preparation should be injected by the caller via extra_contex
 """
 
 import logging
+import copy
+import json
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from src.analyzer import AnalysisResult
 from src.config import get_config
-from src.market_phase_summary import format_public_market_status_line, format_public_phase_pack_excerpt
+from src.market_context import detect_market
+from src.market_phase_summary import format_public_market_status_line, format_public_phase_pack_excerpt, render_market_phase_summary
 from src.report_language import (
     get_localized_stock_name,
     get_report_labels,
@@ -110,8 +114,9 @@ def render(
     Returns:
         Rendered string, or None on error (caller should fallback).
     """
-    from datetime import datetime
+    from datetime import datetime, timezone
 
+    results = [_public_price_result(result) for result in results]
     try:
         from jinja2 import Environment, FileSystemLoader, select_autoescape
     except ImportError:
@@ -188,7 +193,7 @@ def render(
                 models_used.append(model)
         models_used = list(dict.fromkeys(models_used))
 
-    report_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    report_timestamp = datetime.now(timezone.utc).isoformat()
 
     def failed_checks(checklist: List[str]) -> List[str]:
         return [c for c in (checklist or []) if c.startswith("❌") or c.startswith("⚠️")]
@@ -264,3 +269,117 @@ def render(
     except Exception as e:
         logger.warning("Report render failed for %s: %s", template_name, e)
         return None
+
+
+def _public_price_result(result: AnalysisResult) -> AnalysisResult:
+    """Normalize unqualified yuan only in stock-price fields, preserving explicit CNY facts."""
+    snapshot = result.market_snapshot or {}
+    currency = snapshot.get("currency") or {"us": "USD", "hk": "HKD"}.get(detect_market(result.code))
+    if currency not in {"USD", "HKD"}:
+        return result
+    result = copy.copy(result)
+    result.dashboard = copy.deepcopy(result.dashboard or {})
+
+    def normalize(value):
+        if isinstance(value, dict):
+            return {key: normalize(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [normalize(item) for item in value]
+        if not isinstance(value, str):
+            return value
+
+        def replace(match):
+            prefix = value[max(0, match.start() - 8):match.start()].rstrip()
+            return match.group(0) if prefix.endswith(("人民币", "人民幣", "CNY", "RMB")) else match.group(1) + " " + currency
+
+        return re.sub(r"(?<![\d.])(\d+(?:,\d{3})*(?:\.\d+)?)\s*元", replace, value)
+
+    for section, field in (
+        ("core_conclusion", "position_advice"), ("battle_plan", "sniper_points"),
+        ("data_perspective", "price_position"), ("phase_decision", "watch_conditions"),
+    ):
+        container = result.dashboard.get(section)
+        if isinstance(container, dict) and field in container:
+            container[field] = normalize(container[field])
+    return result
+
+
+def classify_analysis_failure(error: Any) -> str:
+    """Export categorical failure codes, never provider exception bodies or credentials."""
+    text = str(error or "").lower()
+    if any(marker in text for marker in ("429", "quota", "ratelimit", "rate limit")):
+        return "rate_limited"
+    if any(marker in text for marker in ("503", "serviceunavailable", "high demand")):
+        return "provider_unavailable"
+    if "timeout" in text or "timed out" in text:
+        return "timeout"
+    return "analysis_failed"
+
+
+def write_analysis_summary(report_path, results, requested_codes, failures):
+    """Add coverage to the existing Markdown and a public, allowlisted JSON sidecar."""
+    from datetime import datetime, timezone
+
+    path = Path(report_path)
+    generated_at = datetime.now(timezone.utc).isoformat()
+    requested = list(dict.fromkeys(str(code) for code in requested_codes))
+    by_code = {str(result.code): _public_price_result(result) for result in results if result.success}
+    analyzed = [code for code in requested if code in by_code]
+    failed = [code for code in requested if code not in by_code]
+    snapshot_keys = (
+        "date", "analysis_time", "currency", "close", "prev_close", "open", "high", "low",
+        "pct_chg", "change_amount", "amplitude", "volume", "amount", "price", "source",
+        "daily_source", "daily_is_estimated", "fetched_at", "provider_timestamp", "quote_session",
+        "extended_price", "extended_timestamp", "extended_session", "data_quality",
+        "missing_fields", "is_stale", "stale_seconds",
+    )
+    allowed_reasons = {"rate_limited", "provider_unavailable", "timeout", "analysis_failed", "no_result"}
+    failures = {code: reason if reason in allowed_reasons else classify_analysis_failure(reason) for code, reason in failures.items()}
+    stocks = []
+    for code in requested:
+        result = by_code.get(code)
+        if result is None:
+            stocks.append({"code": code, "status": "failed", "failure_reason": failures.get(code, "no_result"), "score": None})
+            continue
+        dashboard = result.dashboard or {}
+        intelligence = dashboard.get("intelligence") or {}
+        phase_decision = dashboard.get("phase_decision") or {}
+        snapshot = result.market_snapshot or {}
+        stocks.append({
+            "code": code, "status": "analyzed", "analysis_time": snapshot.get("analysis_time"),
+            "score": result.sentiment_score, "signal": result.operation_advice,
+            "technical_signals": {
+                "trend": result.trend_prediction, "analysis": result.technical_analysis,
+                "moving_averages": result.ma_analysis,
+            },
+            "quote": {key: snapshot.get(key) for key in snapshot_keys},
+            "market_phase": render_market_phase_summary(getattr(result, "market_phase_summary", None)),
+            "risks": {"warning": result.risk_warning, "alerts": intelligence.get("risk_alerts") or []},
+            "catalysts": intelligence.get("positive_catalysts") or [],
+            "trigger_conditions": phase_decision.get("watch_conditions") or [],
+            "price_levels": {key: ((dashboard.get("battle_plan") or {}).get("sniper_points") or {}).get(key)
+                             for key in ("ideal_buy", "secondary_buy", "stop_loss", "take_profit")},
+            "data_quality": {"sources": result.data_sources, "limitations": phase_decision.get("data_limitations") or []},
+        })
+    summary = {
+        "schema_version": 1, "generated_at": generated_at,
+        "status": "complete" if requested and not failed else "partial" if analyzed else "failed",
+        "requested_codes": requested, "analyzed_codes": analyzed, "failed_codes": failed,
+        "counts": {"requested": len(requested), "analyzed": len(analyzed), "failed": len(failed)},
+        "stocks": stocks,
+        "disclosure": "Coverage is not market-price certification. Missing quote timestamps are unknown; fetch times are not quote times.",
+    }
+    language = normalize_report_language(next((result.report_language for result in results), getattr(get_config(), "report_language", "zh")))
+    if language == "zh":
+        lines = ["## 股票池覆盖", "", f"> 状态：{summary['status']}；计划 {len(requested)} 只，完成 {len(analyzed)} 只，失败 {len(failed)} 只。", f"> 分析汇总时间（UTC）：{generated_at}。覆盖完整不代表行情已独立核实。"]
+        if failed:
+            lines += ["", "| 未完成代码 | 原因 |", "|---|---|"]
+    else:
+        lines = ["## Universe coverage", "", f"> Status: {summary['status']}; requested {len(requested)}, analyzed {len(analyzed)}, failed {len(failed)}.", f"> Summary time (UTC): {generated_at}. Coverage is not independent market-price verification."]
+        if failed:
+            lines += ["", "| Failed code | Reason |", "|---|---|"]
+    lines += [f"| {code} | {failures.get(code, 'no_result')} |" for code in failed]
+    content = path.read_text(encoding="utf-8")
+    path.write_text("\n".join(lines) + "\n\n---\n\n" + content, encoding="utf-8")
+    path.with_suffix(".json").write_text(json.dumps(summary, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8")
+    return summary
