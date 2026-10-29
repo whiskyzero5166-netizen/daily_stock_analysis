@@ -127,16 +127,7 @@ jobs:
           PYTEST_SPLITS: '3'
           PYTEST_GROUP: ${{ matrix.shard }}
           PYTEST_FIRST_SHARD_OVERHEAD: '20'
-          REPORT_EVIDENCE_DIR: ${{ runner.temp }}/report-contract-evidence
         run: ./scripts/ci_gate.sh offline-tests
-      - name: 📎 Upload report contract evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: report-contract-evidence-${{ github.event.pull_request.head.sha }}-${{ matrix.shard }}
-          path: ${{ runner.temp }}/report-contract-evidence/
-          if-no-files-found: ignore
-          retention-days: 30
 
   backend-gate:
     name: backend-gate
