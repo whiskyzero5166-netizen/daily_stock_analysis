@@ -382,10 +382,26 @@ class YfinanceFetcher(BaseFetcher):
             行情字典，失败时返回 None
         """
         ticker = yf.Ticker(yf_code)
-        # 取近两日数据以计算涨跌幅
-        hist = ticker.history(period='2d')
+        is_us_index = bool(get_us_index_yf_symbol(return_code)[0])
+        # One bounded history request; retain enough completed bars before the close.
+        hist = ticker.history(period='5d' if is_us_index else '2d')
         if hist.empty:
             return None
+        if is_us_index:
+            from src.core.trading_calendar import build_market_phase_context, resolve_historical_daily_bar_date
+
+            phase_context = build_market_phase_context(market="us", current_time=datetime.now(timezone.utc))
+            completed_date = resolve_historical_daily_bar_date(
+                "us", phase_context.session_date, phase_context.phase.value,
+            )
+            if completed_date is None:
+                logger.warning("[Yfinance] US index completed session unavailable; skipping unverified bars")
+                return None
+            cutoff = completed_date.isoformat()
+            bar_dates = [stamp.strftime('%Y-%m-%d') if hasattr(stamp, 'strftime') else None for stamp in hist.index]
+            hist = hist.loc([value is not None and value <= cutoff for value in bar_dates]]
+            if hist.empty:
+                return None
         today_row = hist.iloc[-1]
         prev_row = hist.iloc[-2] if len(hist) > 1 else today_row
         price = float(today_row['Close'])
@@ -410,7 +426,7 @@ class YfinanceFetcher(BaseFetcher):
             'amount': 0.0,  # Yahoo Finance 不提供准确成交额
             'amplitude': amplitude,
         }
-        if get_us_index_yf_symbol(return_code)[0]:
+        if is_us_index:
             # history() supplies a bar date, not an exchange quote timestamp.
             bar_stamp = hist.index[-1]
             data_date = bar_stamp.strftime('%Y-%m-%d') if hasattr(bar_stamp, 'strftime') else None
@@ -420,9 +436,13 @@ class YfinanceFetcher(BaseFetcher):
                 'quote_session': 'daily',
                 'provider_timestamp': None,
                 'fetched_at': datetime.now(timezone.utc).isoformat(),
-                'data_quality': 'partial',
+                'data_quality': 'stale' if data_date != cutoff else 'partial',
                 'missing_fields': ['provider_timestamp', 'amount'] + (['data_date'] if data_date is None else []),
                 'unit': 'points',
+                'market_phase': phase_context.phase.value,
+                'market_local_time': phase_context.market_local_time.isoformat(),
+                'effective_daily_bar_date': cutoff,
+                'is_stale': data_date != cutoff,
             })
         return data
 
