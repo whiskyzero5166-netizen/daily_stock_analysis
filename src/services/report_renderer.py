@@ -10,6 +10,7 @@ Any expensive data preparation should be injected by the caller via extra_contex
 """
 
 import logging
+import os
 import copy
 import json
 import re
@@ -116,7 +117,7 @@ def render(
     """
     from datetime import datetime, timezone
 
-    results = [_public_price_result(result) for result in results]
+    results = [normalize_price_result(result) for result in results]
     try:
         from jinja2 import Environment, FileSystemLoader, select_autoescape
     except ImportError:
@@ -235,6 +236,7 @@ def render(
         "clean_sniper": _clean_sniper_value,
         "failed_checks": failed_checks,
         "phase_pack_excerpt": phase_pack_excerpt,
+        "market_snapshot_notes": market_snapshot_notes,
         "history_by_code": {},
         "get_chip_unavailable_reason": get_chip_unavailable_reason,
         "is_chip_structure_unavailable": is_chip_structure_unavailable,
@@ -271,7 +273,7 @@ def render(
         return None
 
 
-def _public_price_result(result: AnalysisResult) -> AnalysisResult:
+def normalize_price_result(result: AnalysisResult) -> AnalysisResult:
     """Normalize unqualified yuan only in stock-price fields, preserving explicit CNY facts."""
     snapshot = result.market_snapshot or {}
     currency = snapshot.get("currency") or {"us": "USD", "hk": "HKD"}.get(detect_market(result.code))
@@ -323,7 +325,7 @@ def write_analysis_summary(report_path, results, requested_codes, failures):
     path = Path(report_path)
     generated_at = datetime.now(timezone.utc).isoformat()
     requested = list(dict.fromkeys(str(code) for code in requested_codes))
-    by_code = {str(result.code): _public_price_result(result) for result in results if result.success}
+    by_code = {str(result.code): normalize_price_result(result) for result in results if result.success}
     analyzed = [code for code in requested if code in by_code]
     failed = [code for code in requested if code not in by_code]
     snapshot_keys = (
@@ -363,6 +365,8 @@ def write_analysis_summary(report_path, results, requested_codes, failures):
         })
     summary = {
         "schema_version": 1, "generated_at": generated_at,
+        "workflow_run_id": os.getenv("GITHUB_RUN_ID"),
+        "workflow_run_attempt": os.getenv("GITHUB_RUN_ATTEMPT"),
         "status": "complete" if requested and not failed else "partial" if analyzed else "failed",
         "requested_codes": requested, "analyzed_codes": analyzed, "failed_codes": failed,
         "counts": {"requested": len(requested), "analyzed": len(analyzed), "failed": len(failed)},
@@ -383,3 +387,32 @@ def write_analysis_summary(report_path, results, requested_codes, failures):
     path.write_text("\n".join(lines) + "\n\n---\n\n" + content, encoding="utf-8")
     path.with_suffix(".json").write_text(json.dumps(summary, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8")
     return summary
+
+
+def market_snapshot_notes(snapshot, report_language="zh"):
+    """One disclosure contract for legacy, single-stock and Jinja report paths."""
+    english = report_language in {"en", "ko"}
+    unknown = "unknown" if english else "未知"
+    stamp = snapshot.get("provider_timestamp")
+    fetched = snapshot.get("fetched_at") or unknown
+    currency = snapshot.get("currency") or unknown
+    session = snapshot.get("quote_session") or "unknown"
+    missing = ", ".join(snapshot.get("missing_fields") or []) or ("none reported" if english else "未报告")
+    if english:
+        notes = [f"> Analysis time (UTC): {snapshot.get('analysis_time') or unknown}; bar date: {snapshot.get('date') or unknown}; bar source: {snapshot.get('daily_source') or unknown}; estimated: {bool(snapshot.get('daily_is_estimated'))}."]
+        if "price" in snapshot:
+            notes.append(f"> Quote session: {session}; provider time: {stamp or 'unknown — real-time status unverified'}; fetched at: {fetched}.")
+        if snapshot.get("extended_price") is not None and snapshot.get("extended_timestamp"):
+            notes.append(f"> Separate {snapshot.get('extended_session')} quote: {snapshot['extended_price']} {currency}; provider time: {snapshot['extended_timestamp']}. Not used as the regular close.")
+        notes.append(f"> Data quality: {snapshot.get('data_quality') or unknown}; missing: {missing}; stale: {snapshot.get('is_stale')}. Fetch time is not quote time; table arithmetic does not independently verify market prices.")
+    else:
+        sessions = {"intraday": "盘中（未收盘）", "close": "常规时段收盘报价", "daily": "日线数据", "unknown": "未知"}
+        notes = [f"> 分析时间（UTC）：{snapshot.get('analysis_time') or unknown}；行情日期：{snapshot.get('date') or unknown}；日线来源：{snapshot.get('daily_source') or unknown}；估算数据：{bool(snapshot.get('daily_is_estimated'))}。"]
+        if "price" in snapshot:
+            quote_time = stamp or "未知（不能确认实时性）"
+            notes.append(f"> 报价时段：{sessions.get(session, unknown)}；行情时间：{quote_time}；获取时间：{fetched}。")
+        if snapshot.get("extended_price") is not None and snapshot.get("extended_timestamp"):
+            extended_session = "盘后" if snapshot.get("extended_session") == "postmarket" else "盘前"
+            notes.append(f"> 独立{extended_session}报价：{snapshot['extended_price']} {currency}；行情时间：{snapshot['extended_timestamp']}。此价格不作为常规时段收盘价。")
+        notes.append(f"> 数据质量：{snapshot.get('data_quality') or unknown}；缺失字段：{missing}；陈旧标记：{snapshot.get('is_stale')}。获取时间不等于行情时间，表内涨跌幅算术一致也不代表市场价格已独立核实。")
+    return notes
