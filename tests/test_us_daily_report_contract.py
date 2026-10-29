@@ -17,7 +17,7 @@ import yaml
 
 from data_provider.realtime_types import RealtimeSource, UnifiedRealtimeQuote
 from data_provider.yfinance_fetcher import YfinanceFetcher, _with_yahoo_quote_metadata
-from scripts.publish_analysis_artifact import publish_reports
+from scripts.publish_analysis_artifact import publish_reports, report_exit_code
 from src.analyzer import AnalysisResult, GeminiAnalyzer
 from src.core.pipeline import StockAnalysisPipeline
 from src.notification import NotificationService
@@ -218,11 +218,12 @@ def test_summary_has_every_requested_symbol_and_excludes_private_payloads(tmp_pa
     assert all(stock["failure_reason"] == "rate_limited" and stock["score"] is None for stock in summary["stocks"] if stock["status"] == "failed")
 
 
-@pytest.mark.parametrize("count,status", [(36, "complete"), (5, "partial"), (0, "partial")])
-def test_publisher_preserves_markdown_aliases_and_rejects_incomplete_coverage(tmp_path, count, status):
+@pytest.mark.parametrize("count,status,exit_code", [(36, "complete", 0), (5, "partial", 0), (0, "failed", 1)])
+def test_publisher_preserves_markdown_aliases_and_validates_partial_coverage(tmp_path, count, status, exit_code):
     write_fixture(tmp_path, count)
     result = publish_reports(tmp_path, publisher_env())
     assert result["status"] == status
+    assert report_exit_code(result) == exit_code
     assert (tmp_path / "report_20261028.md").is_file()
     assert all((tmp_path / "latest" / name).is_file() for name in ("report.md", "summary.json", "market_review.md", "run.json"))
     if count < 36:
@@ -252,8 +253,9 @@ def test_publisher_rejects_wrong_run_and_tampered_counts(tmp_path):
     summary["counts"]["analyzed"] = 5
     path.write_text(json.dumps(summary), encoding="utf-8")
     result = publish_reports(tmp_path, publisher_env(GITHUB_RUN_ID="new-run"))
-    assert "stock_summary_run_mismatch" in result["issues"] and "stock_coverage_incomplete" in result["issues"]
+    assert "stock_summary_run_mismatch" in result["issues"] and "stock_summary_inconsistent" in result["issues"]
     assert result["status"] != "complete"
+    assert report_exit_code(result) == 1
 
 
 def test_report_contract_evidence(tmp_path):
@@ -317,7 +319,11 @@ def test_us_index_history_carries_bar_date_without_claiming_quote_timestamp(date
     if dated:
         frame.index = pd.to_datetime(["2026-10-27", "2026-10-28"])
     yahoo = SimpleNamespace(Ticker=lambda symbol: SimpleNamespace(history=lambda **kwargs: frame))
-    rows = YfinanceFetcher()._get_us_main_indices(yahoo)
+    with patch("data_provider.yfinance_fetcher.datetime", MarketTimingClock):
+        rows = YfinanceFetcher()._get_us_main_indices(yahoo)
+    if not dated:
+        assert rows is None
+        return
     assert len(rows) == 4
     for row in rows:
         assert row["data_date"] == ("2026-10-28" if dated else None)
@@ -385,4 +391,59 @@ def test_us_market_report_visual_evidence():
         with open(summary_file, "a", encoding="utf-8") as handle:
             handle.write("\n# 美股大盘日期验收：合成日线\n\n10月29日盘前生成，指数日线为10月28日；仅合成数据。\n\n" + report + "\n")
     assert "2026-10-28" in report and "2026-10-29T12:15:00+00:00" in report
+
+@pytest.mark.parametrize("stamp,dates,expected,phase", [
+    ("2026-10-29T12:15:00+00:00", ["2026-10-27", "2026-10-28", "2026-10-29"], "2026-10-28", "premarket"),
+    ("2026-10-29T17:00:00+00:00", ["2026-10-27", "2026-10-28", "2026-10-29"], "2026-10-28", "intraday"),
+    ("2026-10-29T19:59:00+00:00", ["2026-10-27", "2026-10-28", "2026-10-29"], "2026-10-28", "closing_auction"),
+    ("2026-10-29T20:00:00+00:00", ["2026-10-27", "2026-10-28", "2026-10-29"], "2026-10-29", "postmarket"),
+    ("2026-11-27T17:59:00+00:00", ["2026-11-24", "2026-11-25", "2026-11-27"], "2026-11-25", "closing_auction"),
+    ("2026-11-27T18:00:00+00:00", ["2026-11-24", "2026-11-25", "2026-11-27"], "2026-11-27", "postmarket"),
+])
+def test_us_index_selection_respects_regular_and_early_close(stamp, dates, expected, phase):
+    import pandas as pd
+
+    frame = pd.DataFrame({"Open": [100, 101, 999], "High": [102, 112, 1001],
+                          "Low": [99, 99, 998], "Close": [100, 110, 1000], "Volume": [1000, 1200, 10]},
+                         index=pd.to_datetime(dates))
+    yahoo = SimpleNamespace(Ticker=lambda symbol: SimpleNamespace(history=MagicMock(return_value=frame)))
+    with patch("data_provider.yfinance_fetcher.datetime") as clock:
+        clock.now.return_value = datetime.fromisoformat(stamp)
+        row = YfinanceFetcher()._fetch_yf_ticker_data(yahoo, "^GSPC", "Synthetic SPX", "SPX")
+    assert row["data_date"] == expected and row["market_phase"] == phase
+    assert row["effective_daily_bar_date"] == expected
+    assert row["current"] == (1000 if expected == dates[-1] else 110)
+    assert row["provider_timestamp"] is None
+
+
+def test_us_market_discards_future_bars_and_exposes_current_phase():
+    analyzer = market_timing_fixture(dates=("2026-10-28", "2026-10-29"))
+    with patch("src.market_analyzer.datetime") as clock:
+        clock.now.return_value = datetime(2026, 10, 29, 17, tzinfo=timezone.utc)
+        overview = analyzer.get_market_overview()
+    assert overview.date == "2026-10-28" and len(overview.indices) == 1
+    assert overview.market_phase_context["phase"] == "intraday"
+    report = analyzer._inject_data_into_review("## 2026-10-29 大盘复盘\n\n模型正文。", overview, [])
+    assert report.startswith("## 2026-10-28 大盘复盘")
+    assert "market_phase：intraday" in report
+    payload = analyzer.build_market_review_payload(overview, [], report)
+    assert payload["market_phase_context"]["effective_daily_bar_date"] == "2026-10-28"
+
+
+def test_us_market_calendar_failure_does_not_certify_uncompleted_bars():
+    analyzer = market_timing_fixture()
+    with patch("src.core.trading_calendar._XCALS_AVAILABLE", False), patch("src.market_analyzer.datetime", MarketTimingClock):
+        overview = analyzer.get_market_overview()
+    assert overview.indices == []
+    assert overview.market_phase_context["phase"] == "unknown"
+    assert overview.market_phase_context["effective_daily_bar_date"] is None
+
+
+def test_partial_report_still_fails_when_required_files_are_missing(tmp_path):
+    write_fixture(tmp_path, 5)
+    (tmp_path / "market_review_20261028.md").unlink()
+    outcome = publish_reports(tmp_path, publisher_env())
+    assert outcome["status"] == "partial"
+    assert "market_review_missing" in outcome["issues"]
+    assert report_exit_code(outcome) == 1
 
