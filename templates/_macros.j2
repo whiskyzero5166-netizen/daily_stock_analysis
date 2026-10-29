@@ -2,14 +2,11 @@
 {% macro market_snapshot(result) %}
 {% set snapshot = result.market_snapshot if result.market_snapshot else {} %}
 {% if snapshot %}
-{% set english = report_language in ('en', 'ko') %}
 ### 📈 {{ labels.market_snapshot_heading }} ({{ snapshot.get('currency') or 'unknown' }})
 
-{% if english %}
-> Analysis time (UTC): {{ snapshot.get('analysis_time') or 'unknown' }}; bar date: {{ snapshot.get('date') or 'unknown' }}; bar source: {{ snapshot.get('daily_source') or 'unknown' }}; estimated: {{ snapshot.get('daily_is_estimated', false) }}.
-{% else %}
-> 分析时间（UTC）：{{ snapshot.get('analysis_time') or '未知' }}；行情日期：{{ snapshot.get('date') or '未知' }}；日线来源：{{ snapshot.get('daily_source') or '未知' }}；估算数据：{{ snapshot.get('daily_is_estimated', false) }}。
-{% endif %}
+{% for note in market_snapshot_notes(snapshot, report_language) %}
+{{ note }}
+{% endfor %}
 
 | {{ labels.current_price_label if snapshot.get('daily_is_estimated') else labels.close_label }} | {{ labels.prev_close_label }} | {{ labels.open_label }} | {{ labels.high_label }} | {{ labels.low_label }} | {{ labels.change_pct_label }} | {{ labels.change_amount_label }} | {{ labels.amplitude_label }} | {{ labels.volume_label }} | {{ labels.amount_label }} |
 |------|------|------|------|------|-------|-------|------|--------|--------|
@@ -19,24 +16,6 @@
 | {{ labels.current_price_label }} | {{ labels.volume_ratio_label }} | {{ labels.turnover_rate_label }} | {{ labels.source_label }} |
 |-------|------|--------|----------|
 | {{ snapshot.get('price', 'N/A') }} | {{ snapshot.get('volume_ratio', 'N/A') }} | {{ snapshot.get('turnover_rate', 'N/A') }} | {{ snapshot.get('source', 'N/A') }} |
-{% if english %}
-> Quote session: {{ snapshot.get('quote_session') or 'unknown' }}; provider time: {{ snapshot.get('provider_timestamp') or 'unknown — real-time status unverified' }}; fetched at: {{ snapshot.get('fetched_at') or 'unknown' }}.
-{% else %}
-{% set sessions = {'intraday': '盘中（未收盘）', 'close': '常规时段收盘报价', 'daily': '日线数据', 'unknown': '未知'} %}
-> 报价时段：{{ sessions.get(snapshot.get('quote_session'), '未知') }}；行情时间：{{ snapshot.get('provider_timestamp') or '未知（不能确认实时性）' }}；获取时间：{{ snapshot.get('fetched_at') or '未知' }}。
-{% endif %}
-{% if snapshot.get('extended_price') is not none and snapshot.get('extended_timestamp') %}
-{% if english %}
-> Separate {{ snapshot.get('extended_session') }} quote: {{ snapshot.get('extended_price') }} {{ snapshot.get('currency') or 'unknown' }}; provider time: {{ snapshot.get('extended_timestamp') }}. Not used as the regular close.
-{% else %}
-> 独立{{ '盘后' if snapshot.get('extended_session') == 'postmarket' else '盘前' }}报价：{{ snapshot.get('extended_price') }} {{ snapshot.get('currency') or '未知' }}；行情时间：{{ snapshot.get('extended_timestamp') }}。此价格不作为常规时段收盘价。
-{% endif %}
-{% endif %}
-{% endif %}
-{% if english %}
-> Data quality: {{ snapshot.get('data_quality') or 'unknown' }}; missing: {{ (snapshot.get('missing_fields') or []) | join(', ') or 'none reported' }}; stale: {{ snapshot.get('is_stale') }}. Fetch time is not quote time; table arithmetic does not independently verify market prices.
-{% else %}
-> 数据质量：{{ snapshot.get('data_quality') or '未知' }}；缺失字段：{{ (snapshot.get('missing_fields') or []) | join(', ') or '未报告' }}；陈旧标记：{{ snapshot.get('is_stale') }}。获取时间不等于行情时间，表内涨跌幅算术一致也不代表市场价格已独立核实。
 {% endif %}
 
 {% endif %}
