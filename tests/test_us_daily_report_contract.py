@@ -437,6 +437,12 @@ def test_us_market_calendar_failure_does_not_certify_uncompleted_bars():
     assert overview.indices == []
     assert overview.market_phase_context["phase"] == "unknown"
     assert overview.market_phase_context["effective_daily_bar_date"] is None
+    for language in ("zh", "en"):
+        analyzer.config.report_language = language
+        report = analyzer._generate_template_review(overview, [])
+        assert "The supplied completed daily bars" not in report
+        assert "所列已完成日线对应的" not in report
+        assert "unknown" in report
 
 
 def test_partial_report_still_fails_when_required_files_are_missing(tmp_path):
