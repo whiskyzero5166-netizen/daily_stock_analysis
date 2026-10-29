@@ -4036,7 +4036,9 @@ class TestMarketAnalyzerBypassFix:
 
         assert "## 2026-03-05 大盘复盘" in result
         assert "### 一、盘面总览" in result
-        assert "今日美股市场整体呈现**小幅下跌**态势" in result
+        assert "所列已完成日线对应的美股市场整体呈现**小幅下跌**态势" in result
+        assert "今日美股市场整体呈现" not in result
+        assert "market_phase：unknown" in result
         assert "### 6. Strategy Framework" not in result
         assert "### 六、策略框架" in result
         assert "### 1. Market Summary" not in result
