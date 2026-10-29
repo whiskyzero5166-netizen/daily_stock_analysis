@@ -80,7 +80,7 @@ complete 表示预期股票分析与所需文件齐全，不表示价格、财�
 
 只向公开工作流传股票代码和公共分析配置；不要上传账户截图、持仓数量、平均成本、余额、交易流水或私人策略备注，不把它们写入变量、报告、Prompt 或日志。API Key 留在 Secrets 中。该流水线不读取私人账户快照，也不执行交易。
 
-确定性检查在现有 CI 中运行；合成报告与 JSON 存于 report-contract-evidence-<head_sha>-<shard> 附件，所有价格和事件均为测试数据。复现相关测试：
+确定性检查在现有 CI 中运行；打开运行 Summary 的“美股日报契约验收：合成报告”部分，可查看 complete / partial 的 run.json 和可展开的 Markdown 报告。所有价格和事件均为测试数据，不需要修改 CI 工作流或添加新的上传步骤。测试时可通过 REPORT_EVIDENCE_DIR 指定完整 Markdown / JSON 证据输出目录（仅供测试，不是应用配置）。复现相关测试：
 
 ~~~bash
 python -m pytest tests/test_us_daily_report_contract.py -q
