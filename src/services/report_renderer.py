@@ -275,12 +275,12 @@ def render(
 
 def normalize_price_result(result: AnalysisResult) -> AnalysisResult:
     """Normalize unqualified yuan only in stock-price fields, preserving explicit CNY facts."""
-    snapshot = result.market_snapshot or {}
+    snapshot = getattr(result, "market_snapshot", None) or {}
     currency = snapshot.get("currency") or {"us": "USD", "hk": "HKD"}.get(detect_market(result.code))
     if currency not in {"USD", "HKD"}:
         return result
     result = copy.copy(result)
-    result.dashboard = copy.deepcopy(result.dashboard or {})
+    result.dashboard = copy.deepcopy(getattr(result, "dashboard", None) or {})
 
     def normalize(value):
         if isinstance(value, dict):
@@ -349,7 +349,8 @@ def write_analysis_summary(report_path, results, requested_codes, failures):
         snapshot = result.market_snapshot or {}
         stocks.append({
             "code": code, "status": "analyzed", "analysis_time": snapshot.get("analysis_time"),
-            "score": result.sentiment_score, "signal": result.operation_advice,
+            "score": result.sentiment_score,
+            "signal": display_operation_advice_for_result(result, report_language=result.report_language),
             "technical_signals": {
                 "trend": result.trend_prediction, "analysis": result.technical_analysis,
                 "moving_averages": result.ma_analysis,
