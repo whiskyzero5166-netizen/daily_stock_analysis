@@ -396,7 +396,7 @@ class YfinanceFetcher(BaseFetcher):
         low = float(today_row['Low'])
         # 振幅 = (最高 - 最低) / 昨收 * 100
         amplitude = ((high - low) / prev_close * 100) if prev_close else 0
-        return {
+        data = {
             'code': return_code,
             'name': name,
             'current': price,
@@ -410,6 +410,19 @@ class YfinanceFetcher(BaseFetcher):
             'amount': 0.0,  # Yahoo Finance 不提供准确成交额
             'amplitude': amplitude,
         }
+        if get_us_index_yf_symbol(return_code)[0]:
+            # history() supplies a bar date, not an exchange quote timestamp.
+            data.update({
+                'data_date': hist.index[-1].strftime('%Y-%m-%d'),
+                'source': 'yfinance',
+                'quote_session': 'daily',
+                'provider_timestamp': None,
+                'fetched_at': datetime.now(timezone.utc).isoformat(),
+                'data_quality': 'partial',
+                'missing_fields': ['provider_timestamp', 'amount'],
+                'unit': 'points',
+            })
+        return data
 
     def get_main_indices(self, region: str = "cn") -> Optional[List[Dict[str, Any]]]:
         """
