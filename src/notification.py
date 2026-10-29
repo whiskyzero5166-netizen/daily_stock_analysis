@@ -914,6 +914,8 @@ class NotificationService(
         Returns:
             Markdown 格式的日报内容
         """
+        from src.services.report_renderer import normalize_price_result
+        results = [normalize_price_result(result) for result in results]
         if report_date is None:
             report_date = datetime.now().strftime('%Y-%m-%d')
         report_language = self._get_report_language(results)
@@ -1269,6 +1271,8 @@ class NotificationService(
         Returns:
             Markdown 格式的决策仪表盘日报
         """
+        from src.services.report_renderer import normalize_price_result
+        results = [normalize_price_result(result) for result in results]
         config = get_config()
         report_language = self._get_report_language(results)
         labels = get_report_labels(report_language)
@@ -1633,6 +1637,8 @@ class NotificationService(
         Returns:
             精简版决策仪表盘
         """
+        from src.services.report_renderer import normalize_price_result
+        results = [normalize_price_result(result) for result in results]
         config = get_config()
         report_language = self._get_report_language(results)
         labels = get_report_labels(report_language)
@@ -1968,6 +1974,8 @@ class NotificationService(
         Returns:
             Markdown 格式的单股报告
         """
+        from src.services.report_renderer import normalize_price_result
+        result = normalize_price_result(result)
         report_date = datetime.now().strftime('%Y-%m-%d %H:%M')
         report_language = self._get_report_language(result)
         labels = get_report_labels(report_language)
@@ -2128,6 +2136,7 @@ class NotificationService(
         "tushare": {"zh": "Tushare Pro", "en": "Tushare Pro"},
         "sina": {"zh": "新浪财经", "en": "Sina Finance"},
         "stooq": {"zh": "Stooq", "en": "Stooq"},
+        "yfinance": {"zh": "Yahoo Finance (yfinance)", "en": "Yahoo Finance (yfinance)", "ko": "Yahoo Finance (yfinance)"},
         "longbridge": {"zh": "长桥", "en": "Longbridge"},
         "fallback": {"zh": "降级兜底", "en": "Fallback"},
     }
@@ -2143,14 +2152,17 @@ class NotificationService(
         snapshot = getattr(result, 'market_snapshot', None)
         if not snapshot:
             return
+        from src.services.report_renderer import market_snapshot_notes
 
         report_language = self._get_report_language(result)
         labels = get_report_labels(report_language)
-
+        currency = snapshot.get('currency') or 'unknown'
+        price_label = labels['current_price_label'] if snapshot.get('daily_is_estimated') else labels['close_label']
+        lines.extend([f"### 📈 {labels['market_snapshot_heading']} ({currency})", ""])
+        lines.extend(market_snapshot_notes(snapshot, report_language))
         lines.extend([
-            f"### 📈 {labels['market_snapshot_heading']}",
             "",
-            f"| {labels['close_label']} | {labels['prev_close_label']} | {labels['open_label']} | {labels['high_label']} | {labels['low_label']} | {labels['change_pct_label']} | {labels['change_amount_label']} | {labels['amplitude_label']} | {labels['volume_label']} | {labels['amount_label']} |",
+            f"| {price_label} | {labels['prev_close_label']} | {labels['open_label']} | {labels['high_label']} | {labels['low_label']} | {labels['change_pct_label']} | {labels['change_amount_label']} | {labels['amplitude_label']} | {labels['volume_label']} | {labels['amount_label']} |",
             "|------|------|------|------|------|-------|-------|------|--------|--------|",
             f"| {snapshot.get('close', 'N/A')} | {snapshot.get('prev_close', 'N/A')} | "
             f"{snapshot.get('open', 'N/A')} | {snapshot.get('high', 'N/A')} | "
@@ -2158,7 +2170,6 @@ class NotificationService(
             f"{snapshot.get('change_amount', 'N/A')} | {snapshot.get('amplitude', 'N/A')} | "
             f"{snapshot.get('volume', 'N/A')} | {snapshot.get('amount', 'N/A')} |",
         ])
-
         if "price" in snapshot:
             display_source = self._get_source_display_name(snapshot.get('source', 'N/A'), report_language)
             lines.extend([
@@ -2168,7 +2179,6 @@ class NotificationService(
                 f"| {snapshot.get('price', 'N/A')} | {snapshot.get('volume_ratio', 'N/A')} | "
                 f"{snapshot.get('turnover_rate', 'N/A')} | {display_source} |",
             ])
-
         lines.append("")
 
     _CURRENCY_SUFFIX = {
