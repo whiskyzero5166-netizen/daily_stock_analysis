@@ -46,7 +46,11 @@ def publish_reports(reports_dir=None, env=None):
     reports = Path(reports_dir) if reports_dir is not None else ROOT / "reports"
     latest = reports / "latest"
     latest.mkdir(parents=True, exist_ok=True)
+    for alias in ("report.md", "market_review.md", "summary.json", "run.json"):
+        (latest / alias).unlink(missing_ok=True)
     run = {"schema_version": 1, "generated_at": datetime.now(timezone.utc).isoformat(), "workflow": ".github/workflows/00-daily-analysis.yml", "status": "failed", "issues": [], "files": {}}
+    run["workflow_run_id"] = env.get("GITHUB_RUN_ID")
+    run["workflow_run_attempt"] = env.get("GITHUB_RUN_ATTEMPT")
     issues = run["issues"]
     try:
         codes, review_expected, skipped = expected_outputs(env)
@@ -80,6 +84,11 @@ def publish_reports(reports_dir=None, env=None):
                     shutil.copyfile(summary_path, latest / "summary.json")
                     run["files"]["summary.json"] = summary_path.name
                     run["counts"] = summary.get("counts")
+                    if summary.get("schema_version") != 1:
+                        issues.append("stock_summary_schema_mismatch")
+                    for key, source_key in (("workflow_run_id", "GITHUB_RUN_ID"), ("workflow_run_attempt", "GITHUB_RUN_ATTEMPT")):
+                        if env.get(source_key) and str(summary.get(key)) != str(env[source_key]):
+                            issues.append("stock_summary_run_mismatch")
                     requested = summary.get("requested_codes") or []
                     analyzed = summary.get("analyzed_codes") or []
                     records = summary.get("stocks") or []
@@ -87,7 +96,9 @@ def publish_reports(reports_dir=None, env=None):
                         issues.append("stock_universe_mismatch")
                     if (summary.get("status") != "complete" or summary.get("failed_codes")
                             or set(analyzed) != set(codes) or len(analyzed) != len(codes)
-                            or len(records) != len(codes) or any(item.get("status") != "analyzed" for item in records)):
+                            or summary.get("counts") != {"requested": len(codes), "analyzed": len(codes), "failed": 0}
+                            or len(records) != len(codes) or {item.get("code") for item in records} != set(codes)
+                            or any(item.get("status") != "analyzed" for item in records)):
                         issues.append("stock_coverage_incomplete")
             if review_expected and market_report is None:
                 issues.append("market_review_missing")
