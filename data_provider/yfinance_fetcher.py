@@ -399,7 +399,7 @@ class YfinanceFetcher(BaseFetcher):
                 return None
             cutoff = completed_date.isoformat()
             bar_dates = [stamp.strftime('%Y-%m-%d') if hasattr(stamp, 'strftime') else None for stamp in hist.index]
-            hist = hist.loc([value is not None and value <= cutoff for value in bar_dates]]
+            hist = hist.loc[[value is not None and value <= cutoff for value in bar_dates]]
             if hist.empty:
                 return None
         today_row = hist.iloc[-1]
