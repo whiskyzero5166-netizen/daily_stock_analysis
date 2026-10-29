@@ -265,3 +265,12 @@ def test_report_contract_evidence(tmp_path):
     if evidence:
         shutil.copytree(tmp_path, evidence, dirs_exist_ok=True)
         (Path(evidence) / "README.md").write_text("# 合成报告验收样例\n所有价格、信号和事件均为离线合成测试数据，不是实际行情或投资建议。包含默认报告渲染、公开 JSON、完整36只与仅完成5只两种场景。\n", encoding="utf-8")
+
+    summary_file = os.getenv("GITHUB_STEP_SUMMARY")
+    if summary_file:
+        with open(summary_file, "a", encoding="utf-8") as handle:
+            handle.write("# 美股日报契约验收：合成报告\n\n所有价格、信号和事件均为离线合成数据，不是实际行情。\n\n")
+            for name in ("complete", "partial"):
+                latest = tmp_path / name / "latest"
+                handle.write(f"## {name}\n\n~~~json\n" + (latest / "run.json").read_text(encoding="utf-8") + "~~~\n\n")
+                handle.write(f"<details><summary>{name} synthetic Markdown report</summary>\n\n" + (latest / "report.md").read_text(encoding="utf-8") + "\n</details>\n\n")
