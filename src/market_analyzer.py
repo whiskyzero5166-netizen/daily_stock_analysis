@@ -14,7 +14,8 @@ import logging
 import re
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from inspect import getattr_static
 from typing import Optional, Dict, Any, List
 
@@ -25,6 +26,7 @@ from src.config import get_config
 from src.report_language import normalize_report_language
 from src.search_service import SearchService
 from src.core.market_profile import get_profile, MarketProfile
+from src.core.trading_calendar import build_market_phase_context, resolve_historical_daily_bar_date
 from src.core.market_strategy import get_market_strategy_blueprint
 from src.llm.backend_registry import (
     LOCAL_CLI_GENERATION_BACKEND_IDS,
@@ -72,9 +74,10 @@ class MarketIndex:
     volume: float = 0.0          # 成交量（手）
     amount: float = 0.0          # 成交额（元）
     amplitude: float = 0.0       # 振幅(%)
+    quote_metadata: Dict[str, Any] = field(default_factory=dict)
     
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        data = {
             'code': self.code,
             'name': self.name,
             'current': self.current,
@@ -87,12 +90,18 @@ class MarketIndex:
             'amount': self.amount,
             'amplitude': self.amplitude,
         }
+        if self.quote_metadata:
+            data.update(self.quote_metadata)
+        return data
 
 
 @dataclass
 class MarketOverview:
     """市场概览数据"""
     date: str                           # 日期
+    analysis_time: Optional[str] = None
+    date_basis: Optional[str] = None
+    market_phase_context: Dict[str, Any] = field(default_factory=dict)
     indices: List[MarketIndex] = field(default_factory=list)  # 主要指数
     up_count: int = 0                   # 上涨家数
     down_count: int = 0                 # 下跌家数
@@ -556,11 +565,42 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
         Returns:
             MarketOverview: 市场概览数据对象
         """
-        today = datetime.now().strftime('%Y-%m-%d')
-        overview = MarketOverview(date=today)
+        generated_at = datetime.now(timezone.utc)
+        today = (
+            generated_at.astimezone(ZoneInfo("America/New_York"))
+            if self.region == "us" else datetime.now()
+        ).strftime('%Y-%m-%d')
+        overview = MarketOverview(
+            date=today,
+            analysis_time=generated_at.isoformat() if self.region == "us" else None,
+            date_basis="analysis_date" if self.region == "us" else None,
+        )
         
         # 1. 获取主要指数行情（按 region 切换 A 股/美股）
+        completed_date = None
+        if self.region == "us":
+            phase_context = build_market_phase_context(market="us", current_time=generated_at)
+            overview.market_phase_context = phase_context.to_dict()
+            completed_date = resolve_historical_daily_bar_date(
+                "us", phase_context.session_date, phase_context.phase.value,
+            )
+            overview.market_phase_context["effective_daily_bar_date"] = (
+                completed_date.isoformat() if completed_date else None
+            )
         overview.indices = self._get_main_indices()
+        if self.region == "us":
+            cutoff = completed_date.isoformat() if completed_date else None
+            overview.indices = [
+                idx for idx in overview.indices
+                if cutoff and isinstance(idx.quote_metadata.get("data_date"), str)
+                and re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", idx.quote_metadata["data_date"])
+                and idx.quote_metadata["data_date"] <= cutoff
+            ]
+        if self.region == "us" and overview.indices:
+            dates = [idx.quote_metadata.get("data_date") for idx in overview.indices]
+            if all(isinstance(value, str) and re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value) for value in dates) and len(set(dates)) == 1:
+                overview.date = dates[0]
+                overview.date_basis = "data_date"
 
         # 2. 获取涨跌统计（A 股有，美股无等效数据）
         if self.profile.has_market_stats:
@@ -601,7 +641,14 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
                         prev_close=item['prev_close'],
                         volume=item['volume'],
                         amount=item['amount'],
-                        amplitude=item['amplitude']
+                        amplitude=item['amplitude'],
+                        quote_metadata={
+                            key: item[key] for key in (
+                                "data_date", "source", "quote_session", "provider_timestamp",
+                                "fetched_at", "data_quality", "missing_fields", "unit",
+                                "market_phase", "market_local_time", "effective_daily_bar_date", "is_stale",
+                            ) if key in item
+                        } if self.region == "us" else {},
                     )
                     indices.append(index)
 
@@ -1051,6 +1098,9 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
             "markdown_report": report,
         }
 
+        if self.region == "us":
+            payload["market_phase_context"] = dict(overview.market_phase_context)
+
         if light is not None:
             payload["market_light"] = light
 
@@ -1172,7 +1222,7 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
                 )
                 review = f"{review.rstrip()}\n\n{fallback_heading}\n{sector_block}\n"
 
-        return review
+        return self._with_us_quote_disclosure(review, overview)
 
     @staticmethod
     def _insert_after_section(text: str, heading_pattern: str, block: str) -> str:
@@ -1346,10 +1396,59 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
             reasons.append("limited structured breadth data; using available market inputs")
         return reasons[:4]
 
+    def _with_us_quote_disclosure(self, review: str, overview: MarketOverview) -> str:
+        if self.region == "us" and overview.date_basis == "data_date" and review.startswith("#"):
+            heading, separator, body = review.partition("\n")
+            heading = re.sub(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", overview.date, heading, count=1)
+            review = heading + separator + body
+        disclosure = self._build_us_quote_disclosure(overview)
+        if disclosure and disclosure not in review:
+            if review.startswith("#"):
+                heading, _, body = review.partition("\n")
+                review = heading + "\n\n" + disclosure + "\n\n" + body.lstrip("\n")
+            else:
+                review = disclosure + "\n\n" + review
+        return review
+
+    def _build_us_quote_disclosure(self, overview: MarketOverview) -> str:
+        """Keep index bar dates and unknown quote times visible in every report path."""
+        if self.region != "us":
+            return ""
+        english = self._get_review_language() == "en"
+        unknown = "unknown" if english else "未知"
+        analysis_time = overview.analysis_time or unknown
+        if english:
+            basis = "index bar date" if overview.date_basis == "data_date" else "analysis date; index date unconfirmed"
+            lines = ["### Quote timing and data quality", "",
+                     f"> Analysis time: {analysis_time}; title date basis: {basis}. Index levels are in points.",
+                     "> Daily bars do not establish intraday or extended-session prices. Fetch time is not quote time."]
+        else:
+            basis = "指数日线日期" if overview.date_basis == "data_date" else "分析日期（指数日期未确认）"
+            lines = ["### 行情时间与数据质量", "",
+                     f"> 分析时间：{analysis_time}；标题日期口径：{basis}。指数点位单位：点。",
+                     "> 日线不代表盘中或盘后实时报价，获取时间不等于行情时间。"]
+        phase = overview.market_phase_context.get("phase") or "unknown"
+        local_time = overview.market_phase_context.get("market_local_time") or unknown
+        completed = overview.market_phase_context.get("effective_daily_bar_date") or unknown
+        if english:
+            lines.append(f"> Current market_phase: {phase}; market local time: {local_time}; latest completed session: {completed}.")
+        else:
+            lines.append(f"> 当前 market_phase：{phase}；市场本地时间：{local_time}；最近已完成交易日：{completed}。")
+        for idx in overview.indices:
+            meta = idx.quote_metadata
+            missing = ", ".join(meta.get("missing_fields") or []) or unknown
+            if english:
+                lines.append(f"> {idx.code}: bar date {meta.get('data_date') or unknown}; session {meta.get('quote_session') or unknown}; source {meta.get('source') or unknown}; provider time {meta.get('provider_timestamp') or unknown}; fetched at {meta.get('fetched_at') or unknown}; quality {meta.get('data_quality') or unknown}; stale {meta.get('is_stale')}; missing {missing}.")
+            else:
+                session = "日线" if meta.get("quote_session") == "daily" else meta.get("quote_session") or unknown
+                lines.append(f"> {idx.code}：行情日期 {meta.get('data_date') or unknown}；时段 {session}；来源 {meta.get('source') or unknown}；行情时间 {meta.get('provider_timestamp') or unknown}；获取时间 {meta.get('fetched_at') or unknown}；质量 {meta.get('data_quality') or unknown}；陈旧 {meta.get('is_stale')}；缺失 {missing}。")
+        return "\n".join(lines)
+
     def _build_indices_block(self, overview: MarketOverview) -> str:
         """构建指数行情表格"""
+        disclosure = self._build_us_quote_disclosure(overview)
         if not overview.indices:
-            return ""
+            return disclosure
         if self._get_review_language() == "en":
             lines = [
                 f"| Index | Last | Change % | Open | High | Low | Amplitude | Turnover ({self._get_turnover_unit_label()}) |",
@@ -1369,7 +1468,8 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
                 f"{self._format_optional_number(idx.open)} | {self._format_optional_number(idx.high)} | "
                 f"{self._format_optional_number(idx.low)} | {self._format_optional_pct(idx.amplitude)} | {amount_str} |"
             )
-        return "\n".join(lines)
+        table = "\n".join(lines)
+        return disclosure + "\n\n" + table if disclosure else table
 
     def _build_sector_block(self, overview: MarketOverview) -> str:
         """Build industry and concept ranking blocks."""
@@ -1731,6 +1831,18 @@ Concept lagging: {bottom_concepts_text if bottom_concepts_text else "N/A"}"""
             if data_limit_lines:
                 data_limits_block = "## 数据边界\n" + "\n".join(data_limit_lines)
 
+        if self.region == "us":
+            timing_rule = (
+                "Use the supplied index bar date, not the analysis date, for market moves and the title. "
+                "Never describe the current calendar day as closed when its session has not ended or its quotes are missing. "
+                "Separate later news from the dated price bars; do not infer live prices from daily bars."
+                if review_language == "en" else
+                "指数表现与标题必须使用提供的日线日期，不能用分析日期代替；"
+                "当日未收盘或缺少当日行情时，禁止写成当日已经收涨/收跌。"
+                "较晚新闻与所属日期的行情分开说明，日线不能推断实时价格。"
+            )
+            data_limits_block += "\n\n" + self._build_us_quote_disclosure(overview) + "\n\n" + timing_rule
+
         data_no_indices_hint = (
             "注意：由于行情数据获取失败，请主要根据【市场新闻】进行定性分析和总结，不要编造具体的指数点位。"
             if not indices_text
@@ -1891,6 +2003,8 @@ Output the report content directly, no extra commentary.
     
     def _generate_template_review(self, overview: MarketOverview, news: List) -> str:
         """使用模板生成复盘报告（无大模型时的备选方案）"""
+        us_summary_en = ("The supplied completed daily bars" if overview.date_basis == "data_date" else "Available market information")
+        us_summary_zh = "所列已完成日线对应的" if overview.date_basis == "data_date" else "可用信息对应的"
         template_language = self._get_template_review_language()
         mood_code = self.profile.mood_index_code
         # 根据 mood_index_code 查找对应指数
@@ -1957,7 +2071,7 @@ Output the report content directly, no extra commentary.
             report = f"""## {overview.date} {market_name}
 
 ### 1. Market Summary
-Today's {self._get_market_scope_name(template_language)} showed **{market_mood}**.
+{(us_summary_en if self.region == 'us' else "Today's " + self._get_market_scope_name(template_language))} showed **{market_mood}**.
 
 ### 2. Major Indices
 {indices_text or "- No index data available"}
@@ -1971,7 +2085,7 @@ Market conditions can change quickly. The data above is for reference only and d
 ---
 *Review Time: {datetime.now().strftime('%H:%M')}*
 """
-            return report
+            return self._with_us_quote_disclosure(report, overview)
 
         market_labels = {"cn": "A股", "us": "美股", "hk": "港股", "jp": "日股", "kr": "韩股"}
         market_label = market_labels.get(self.region, "A股")
@@ -2014,7 +2128,7 @@ Market conditions can change quickly. The data above is for reference only and d
         )
         return f"""## {overview.date} 大盘复盘
 
-> 今日{market_label}市场整体呈现**{market_mood}**态势，优先观察{summary_focus}。
+> {(us_summary_zh if self.region == 'us' else '今日')}{market_label}市场整体呈现**{market_mood}**态势，优先观察{summary_focus}。
 
 ### 一、盘面总览
 {market_summary_block}

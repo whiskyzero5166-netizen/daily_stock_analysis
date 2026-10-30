@@ -16,6 +16,7 @@ import math
 import re
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List, Tuple, Callable, Union
 
 import litellm
@@ -3601,6 +3602,22 @@ Output strictly in the following JSON format. This is a complete Decision Dashbo
             return result
         return result.text, result.model, result.usage
 
+    @staticmethod
+    def _is_llm_capacity_error(error: Exception) -> bool:
+        """Do not immediately repeat a request after explicit quota or outage errors."""
+        current = error
+        seen = set()
+        for _ in range(8):
+            if current is None or id(current) in seen:
+                break
+            seen.add(id(current))
+            if str(getattr(current, "status_code", "")) in {"429", "503"}:
+                return True
+            if re.search(r"\b(?:429|503)\b|RateLimitError|ServiceUnavailableError", f"{type(current).__name__}: {current}"):
+                return True
+            current = current.__cause__ or current.__context__
+        return False
+
     def _call_litellm_impl(
         self,
         prompt: str,
@@ -3642,7 +3659,7 @@ Output strictly in the following JSON format. This is a complete Decision Dashbo
         requested_timeout = generation_config.get("timeout")
 
         models_to_try = [config.litellm_model] + (config.litellm_fallback_models or [])
-        models_to_try = [m for m in models_to_try if m]
+        models_to_try = list(dict.fromkeys(m for m in models_to_try if m))
 
         use_channel_router = self._has_channel_config(config)
 
@@ -3767,6 +3784,8 @@ Output strictly in the following JSON format. This is a complete Decision Dashbo
                             progress_callback=stream_progress_callback,
                         )
                     except _LiteLLMStreamError as exc:
+                        if self._is_llm_capacity_error(exc):
+                            raise
                         safe_error = self._sanitize_litellm_exception_text(exc, config=config, model=model)
                         if exc.partial_received:
                             logger.warning(
@@ -3782,6 +3801,8 @@ Output strictly in the following JSON format. This is a complete Decision Dashbo
                             )
                         last_error = RuntimeError(f"{type(exc).__name__}: {safe_error}")
                     except Exception as exc:
+                        if self._is_llm_capacity_error(exc):
+                            raise
                         safe_error = self._sanitize_litellm_exception_text(exc, config=config, model=model)
                         logger.warning(
                             "[LiteLLM] %s stream request failed before first chunk, falling back to non-stream: %s",
@@ -4239,6 +4260,10 @@ Output strictly in the following JSON format. This is a complete Decision Dashbo
                 result.report_language = report_language
                 normalize_chip_structure_availability(result, context.get("chip"))
 
+                # Invalid JSON is a failed analysis, not a field-completion request.
+                if not result.success:
+                    break
+
                 # 内容完整性校验（可选）
                 if not config.report_integrity_enabled:
                     break
@@ -4346,17 +4371,20 @@ Output strictly in the following JSON format. This is a complete Decision Dashbo
         today = context.get('today', {})
         unknown_text = get_unknown_text(report_language)
         no_data_text = get_no_data_text(report_language)
+        currency = (context.get("realtime") or {}).get("currency") or {
+            "us": "USD", "hk": "HKD", "cn": "CNY", "jp": "JPY", "kr": "KRW", "tw": "TWD",
+        }.get(detect_market(code), "unknown")
         quote_section_title, close_price_label = _phase_aware_quote_labels(context, report_language)
         hide_regular_session_ohlc = _should_hide_regular_session_ohlc(context)
         realtime_overlay_quote = hide_regular_session_ohlc and _today_has_realtime_overlay(today)
         if english:
-            price_unit = ""
+            price_unit = "" if currency in {"CNY", "RMB", "CNH"} else f" {currency}"
             pct_chg_label = "Realtime Change" if realtime_overlay_quote else "Change"
             volume_label = "Realtime Volume" if realtime_overlay_quote else "Volume"
             amount_label = "Realtime Turnover" if realtime_overlay_quote else "Turnover"
             open_label, high_label, low_label = "Open", "High", "Low"
         else:
-            price_unit = " 元"
+            price_unit = " 元" if currency in {"CNY", "RMB", "CNH"} else f" {currency}"
             pct_chg_label = "实时涨跌幅" if realtime_overlay_quote else "涨跌幅"
             volume_label = "实时成交量" if realtime_overlay_quote else "成交量"
             amount_label = "实时成交额" if realtime_overlay_quote else "成交额"
@@ -4406,6 +4434,11 @@ Output strictly in the following JSON format. This is a complete Decision Dashbo
 
 ---
 """
+        prompt += (
+            f"\nQuote currency: {currency}. Use this ISO currency for all stock price levels; "
+            "do not label USD prices as Chinese yuan. Quote timestamps and fetch times are distinct; "
+            "missing quote times must be disclosed. Keep regular-session and extended-session prices separate.\n"
+        )
         prompt += format_market_phase_prompt_section(
             context.get("market_phase_context"),
             report_language=report_language,
@@ -5148,51 +5181,63 @@ Output the complete Decision Dashboard in JSON format."""
             return 'N/A'
 
     def _build_market_snapshot(self, context: Dict[str, Any]) -> Dict[str, Any]:
-        """构建当日行情快照（展示用）"""
+        """Build a display snapshot without mixing daily and provider price bases."""
         today = context.get('today', {}) or {}
         realtime = context.get('realtime', {}) or {}
         yesterday = context.get('yesterday', {}) or {}
-
-        prev_close = yesterday.get('close')
-        close = today.get('close')
-        high = today.get('high')
-        low = today.get('low')
-
-        amplitude = None
-        change_amount = None
-        if prev_close not in (None, 0) and high is not None and low is not None:
-            try:
-                amplitude = (float(high) - float(low)) / float(prev_close) * 100
-            except (TypeError, ValueError, ZeroDivisionError):
-                amplitude = None
-        if prev_close is not None and close is not None:
-            try:
-                change_amount = float(close) - float(prev_close)
-            except (TypeError, ValueError):
-                change_amount = None
-
+        if not today and realtime:
+            today = {
+                'close': realtime.get('price'), 'pre_close': realtime.get('pre_close'),
+                'open': realtime.get('open_price'), 'high': realtime.get('high'),
+                'low': realtime.get('low'), 'volume': realtime.get('volume'),
+                'amount': realtime.get('amount'), 'data_source': 'realtime:quote',
+                'is_estimated': True,
+            }
+        overlay = _today_has_realtime_overlay(today)
+        prev_close = today.get('pre_close') if overlay else yesterday.get('close')
+        close, high, low = today.get('close'), today.get('high'), today.get('low')
+        amplitude = change_amount = pct_chg = None
+        try:
+            current, previous = float(close), float(prev_close)
+            if math.isfinite(current) and math.isfinite(previous) and previous > 0:
+                change_amount = current - previous
+                pct_chg = (current / previous - 1) * 100
+                if high is not None and low is not None:
+                    amplitude = (float(high) - float(low)) / previous * 100
+        except (TypeError, ValueError, ZeroDivisionError):
+            pass
+        market = detect_market(str(context.get('code') or ''))
+        currency = realtime.get('currency') or {
+            'us': 'USD', 'hk': 'HKD', 'cn': 'CNY', 'jp': 'JPY', 'kr': 'KRW', 'tw': 'TWD',
+        }.get(market)
         snapshot = {
-            "date": context.get('date', '未知'),
-            "close": self._format_price(close),
-            "open": self._format_price(today.get('open')),
-            "high": self._format_price(high),
-            "low": self._format_price(low),
-            "prev_close": self._format_price(prev_close),
-            "pct_chg": self._format_percent(today.get('pct_chg')),
-            "change_amount": self._format_price(change_amount),
-            "amplitude": self._format_percent(amplitude),
-            "volume": self._format_volume(today.get('volume')),
-            "amount": self._format_amount(today.get('amount')),
+            'date': today.get('date') or context.get('date') or 'unknown',
+            'analysis_time': datetime.now(timezone.utc).isoformat(),
+            'close': self._format_price(close),
+            'open': self._format_price(today.get('open')),
+            'high': self._format_price(high), 'low': self._format_price(low),
+            'prev_close': self._format_price(prev_close),
+            'pct_chg': self._format_percent(pct_chg),
+            'change_amount': self._format_price(change_amount),
+            'amplitude': self._format_percent(amplitude),
+            'volume': self._format_volume(today.get('volume')),
+            'amount': self._format_amount(today.get('amount')),
+            'currency': currency,
+            'daily_source': today.get('data_source') or 'unknown',
+            'daily_is_estimated': bool(today.get('is_estimated')),
         }
-
         if realtime:
             snapshot.update({
-                "price": self._format_price(realtime.get('price')),
-                "volume_ratio": realtime.get('volume_ratio', 'N/A'),
-                "turnover_rate": self._format_percent(realtime.get('turnover_rate')),
-                "source": getattr(realtime.get('source'), 'value', realtime.get('source', 'N/A')),
+                'price': self._format_price(realtime.get('price')),
+                'volume_ratio': realtime.get('volume_ratio', 'N/A'),
+                'turnover_rate': self._format_percent(realtime.get('turnover_rate')),
+                'source': getattr(realtime.get('source'), 'value', realtime.get('source', 'unknown')),
+                **{key: realtime.get(key) for key in (
+                    'fetched_at', 'provider_timestamp', 'quote_session',
+                    'extended_price', 'extended_timestamp', 'extended_session',
+                    'data_quality', 'missing_fields', 'is_stale', 'stale_seconds',
+                )},
             })
-
         return snapshot
 
     def _check_content_integrity(

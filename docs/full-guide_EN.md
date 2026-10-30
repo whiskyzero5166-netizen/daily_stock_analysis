@@ -200,7 +200,7 @@ To get started quickly, you need at minimum:
 
 ### 5. Done!
 
-Default schedule: Every weekday at **18:00 (Beijing Time)** automatic execution.
+Default schedule: Monday–Friday at **18:30 America/New_York**, or **06:30 HKT (EDT) / 07:30 HKT (EST) the following day**. Existing exchange-calendar filtering skips market holidays.
 
 ---
 
@@ -781,23 +781,27 @@ If `--stocks` is also present, the Futu portfolio wins. Scheduled mode reloads r
 
 ### GitHub Actions Schedule
 
-Edit `.github/workflows/00-daily-analysis.yml`:
+The workflow uses native timezone-aware scheduling after the change reaches the default branch:
 
-```yaml
-schedule:
-  # UTC time, Beijing time = UTC + 8
-  - cron: '0 10 * * 1-5'   # Monday to Friday 18:00 (Beijing Time)
-```
+~~~yaml
+on:
+  schedule:
+    - cron: '30 18 * * 1-5'
+      timezone: "America/New_York"
+~~~
 
-Common time reference:
+| US Eastern time | Following day in Hong Kong |
+|---|---|
+| 18:30 EDT | 06:30 HKT |
+| 18:30 EST | 07:30 HKT |
 
-| Beijing Time | UTC cron expression |
-|---------|----------------|
-| 09:30 | `'30 1 * * 1-5'` |
-| 12:00 | `'0 4 * * 1-5'` |
-| 15:00 | `'0 7 * * 1-5'` |
-| 18:00 | `'0 10 * * 1-5'` |
-| 21:00 | `'0 13 * * 1-5'` |
+Unconfigured Actions defaults are REPORT_TYPE=full, MARKET_REVIEW_REGION=us and REPORT_LANGUAGE=zh. Variables still take precedence over Secrets and then workflow defaults. Explicit user settings, the stock-list resolver, providers, model credentials, trading-day checks and notifications retain their existing configuration paths. Local / Docker defaults and schedules are unchanged.
+
+See the [US daily report runbook](us-daily-analysis.md) (Chinese) for enabling a paused workflow, manual modes, downloading analysis-reports-* artifacts, stable reports/latest/ paths, the public JSON schema, data-quality checks and rollback. A weekday trigger is still filtered by the exchange calendar, and GitHub queue delays can postpone execution.
+
+US index reviews expose the current market_phase and use the exchange calendar to select the latest completed session before the regular close, including early-close days. An unavailable calendar leaves the phase unknown and does not certify an unfinished daily bar. US index reviews retain the daily-bar date separately from the report generation time. The title uses a shared, known index date; missing or mixed dates are disclosed. A daily bar does not supply a live quote timestamp, so that timestamp remains unknown. Dated artifact filenames still use the generation date and may be one day later during a manual premarket test.
+
+A consistent partial report is a valid outcome when some providers fail; it does not require 36/36 successes. Missing files, mismatched run identity, inconsistent counts, or zero successful stock analyses remain errors. Always inspect run.json and summary.json. Explicit 429/503 errors skip an immediate non-stream repeat on the same model and move through the existing deduplicated fallback list; invalid JSON does not trigger field-completion re-prompts.
 
 ### Local Scheduled Tasks
 

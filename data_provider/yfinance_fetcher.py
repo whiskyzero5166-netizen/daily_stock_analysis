@@ -16,7 +16,8 @@ YfinanceFetcher - 兜底数据源 (Priority 4)
 
 import csv
 import logging
-from datetime import datetime
+import math
+from datetime import datetime, timezone
 from io import StringIO
 from typing import Optional, List, Dict, Any
 from urllib.error import HTTPError, URLError
@@ -53,6 +54,68 @@ except (ImportError, ModuleNotFoundError):
 import os
 
 logger = logging.getLogger(__name__)
+
+
+def _with_yahoo_quote_metadata(quote: UnifiedRealtimeQuote, info: Dict[str, Any]) -> UnifiedRealtimeQuote:
+    """Keep regular-session prices coherent; never substitute fetch time for quote time."""
+    info = info if isinstance(info, dict) else {}
+
+    def number(key):
+        value = _safe_float(info.get(key))
+        return value if value is not None and math.isfinite(value) else None
+
+    def timestamp(key):
+        value = number(key)
+        if value is None or value <= 0:
+            return None
+        try:
+            return datetime.fromtimestamp(value, timezone.utc).isoformat()
+        except (ValueError, OverflowError, OSError):
+            return None
+
+    regular_price = number("regularMarketPrice")
+    quote.provider_timestamp = None
+    quote.quote_session = "daily"
+    if regular_price is not None and regular_price > 0:
+        quote.price = regular_price
+        quote.pre_close = number("regularMarketPreviousClose")
+        quote.open_price = number("regularMarketOpen")
+        quote.high = number("regularMarketDayHigh")
+        quote.low = number("regularMarketDayLow")
+        quote.volume = number("regularMarketVolume")
+        quote.provider_timestamp = timestamp("regularMarketTime")
+        state = str(info.get("marketState") or "").upper()
+        quote.quote_session = (
+            "intraday" if state == "REGULAR" else
+            "close" if state in {"PRE", "PREPRE", "POST", "POSTPOST", "CLOSED"} else
+            "unknown"
+        ) if quote.provider_timestamp else "unknown"
+
+    quote.source = RealtimeSource.YFINANCE
+    quote.currency = str(info.get("currency") or quote.currency or ("USD" if quote.market == "us" else "")).upper() or None
+    quote.change_amount = None
+    quote.change_pct = None
+    quote.amplitude = None
+    if quote.price is not None and quote.pre_close is not None and quote.pre_close > 0:
+        quote.change_amount = round(quote.price - quote.pre_close, 4)
+        quote.change_pct = round((quote.price / quote.pre_close - 1) * 100, 2)
+        if quote.high is not None and quote.low is not None:
+            quote.amplitude = round((quote.high - quote.low) / quote.pre_close * 100, 2)
+
+    # Extended-session prices have their own timestamps and never replace regular OHLC.
+    extended = []
+    for prefix, session in (("preMarket", "premarket"), ("postMarket", "postmarket")):
+        price, stamp = number(prefix + "Price"), timestamp(prefix + "Time")
+        if price is not None and price > 0 and stamp and (not quote.provider_timestamp or stamp > quote.provider_timestamp):
+            extended.append((stamp, price, session))
+    if extended:
+        quote.extended_timestamp, quote.extended_price, quote.extended_session = max(extended)
+    quote.missing_fields = [
+        key for key in ("price", "pre_close", "volume", "amount", "currency", "provider_timestamp")
+        if getattr(quote, key, None) is None
+    ] or None
+    quote.data_quality = "partial" if quote.missing_fields else "ok"
+    return quote
 
 
 class YfinanceFetcher(BaseFetcher):
@@ -319,10 +382,26 @@ class YfinanceFetcher(BaseFetcher):
             行情字典，失败时返回 None
         """
         ticker = yf.Ticker(yf_code)
-        # 取近两日数据以计算涨跌幅
-        hist = ticker.history(period='2d')
+        is_us_index = bool(get_us_index_yf_symbol(return_code)[0])
+        # One bounded history request; retain enough completed bars before the close.
+        hist = ticker.history(period='5d' if is_us_index else '2d')
         if hist.empty:
             return None
+        if is_us_index:
+            from src.core.trading_calendar import build_market_phase_context, resolve_historical_daily_bar_date
+
+            phase_context = build_market_phase_context(market="us", current_time=datetime.now(timezone.utc))
+            completed_date = resolve_historical_daily_bar_date(
+                "us", phase_context.session_date, phase_context.phase.value,
+            )
+            if completed_date is None:
+                logger.warning("[Yfinance] US index completed session unavailable; skipping unverified bars")
+                return None
+            cutoff = completed_date.isoformat()
+            bar_dates = [stamp.strftime('%Y-%m-%d') if hasattr(stamp, 'strftime') else None for stamp in hist.index]
+            hist = hist.loc[[value is not None and value <= cutoff for value in bar_dates]]
+            if hist.empty:
+                return None
         today_row = hist.iloc[-1]
         prev_row = hist.iloc[-2] if len(hist) > 1 else today_row
         price = float(today_row['Close'])
@@ -333,7 +412,7 @@ class YfinanceFetcher(BaseFetcher):
         low = float(today_row['Low'])
         # 振幅 = (最高 - 最低) / 昨收 * 100
         amplitude = ((high - low) / prev_close * 100) if prev_close else 0
-        return {
+        data = {
             'code': return_code,
             'name': name,
             'current': price,
@@ -347,6 +426,25 @@ class YfinanceFetcher(BaseFetcher):
             'amount': 0.0,  # Yahoo Finance 不提供准确成交额
             'amplitude': amplitude,
         }
+        if is_us_index:
+            # history() supplies a bar date, not an exchange quote timestamp.
+            bar_stamp = hist.index[-1]
+            data_date = bar_stamp.strftime('%Y-%m-%d') if hasattr(bar_stamp, 'strftime') else None
+            data.update({
+                'data_date': data_date,
+                'source': 'yfinance',
+                'quote_session': 'daily',
+                'provider_timestamp': None,
+                'fetched_at': datetime.now(timezone.utc).isoformat(),
+                'data_quality': 'stale' if data_date != cutoff else 'partial',
+                'missing_fields': ['provider_timestamp', 'amount'] + (['data_date'] if data_date is None else []),
+                'unit': 'points',
+                'market_phase': phase_context.phase.value,
+                'market_local_time': phase_context.market_local_time.isoformat(),
+                'effective_daily_bar_date': cutoff,
+                'is_stale': data_date != cutoff,
+            })
+        return data
 
     def get_main_indices(self, region: str = "cn") -> Optional[List[Dict[str, Any]]]:
         """
@@ -713,7 +811,7 @@ class YfinanceFetcher(BaseFetcher):
                 if info is None:
                     raise ValueError("fast_info is None")
                 price = getattr(info, 'lastPrice', None) or getattr(info, 'last_price', None)
-                prev_close = getattr(info, 'previousClose', None) or getattr(info, 'previous_close', None)
+                prev_close = getattr(info, 'regular_market_previous_close', None) or getattr(info, 'regularMarketPreviousClose', None)
                 open_price = getattr(info, 'open', None)
                 high = getattr(info, 'dayHigh', None) or getattr(info, 'day_high', None)
                 low = getattr(info, 'dayLow', None) or getattr(info, 'day_low', None)
@@ -763,7 +861,7 @@ class YfinanceFetcher(BaseFetcher):
             quote = UnifiedRealtimeQuote(
                 code=user_code,
                 name=index_name or user_code,
-                source=RealtimeSource.FALLBACK,
+                source=RealtimeSource.YFINANCE,
                 market="us",
                 currency=str(ticker_info.get("currency") or "").upper() or None,
                 data_quality="partial" if missing_fields else "ok",
@@ -785,7 +883,8 @@ class YfinanceFetcher(BaseFetcher):
                 total_mv=None,
                 circ_mv=None,
             )
-            logger.info(f"[Yfinance] 获取美股指数 {user_code} 实时行情成功: 价格={price}")
+            quote = _with_yahoo_quote_metadata(quote, ticker_info)
+            logger.info(f"[Yfinance] 获取美股指数 {user_code} 行情成功: 价格={quote.price}")
             return quote
         except Exception as e:
             logger.warning(f"[Yfinance] 获取美股指数 {user_code} 实时行情失败: {e}")
@@ -840,7 +939,7 @@ class YfinanceFetcher(BaseFetcher):
                     raise ValueError("fast_info is None")
 
                 price = getattr(info, 'lastPrice', None) or getattr(info, 'last_price', None)
-                prev_close = getattr(info, 'previousClose', None) or getattr(info, 'previous_close', None)
+                prev_close = getattr(info, 'regular_market_previous_close', None) or getattr(info, 'regularMarketPreviousClose', None)
                 open_price = getattr(info, 'open', None)
                 high = getattr(info, 'dayHigh', None) or getattr(info, 'day_high', None)
                 low = getattr(info, 'dayLow', None) or getattr(info, 'day_low', None)
@@ -911,7 +1010,7 @@ class YfinanceFetcher(BaseFetcher):
             quote = UnifiedRealtimeQuote(
                 code=symbol,
                 name=name,
-                source=RealtimeSource.FALLBACK,
+                source=RealtimeSource.YFINANCE,
                 market=suffix_market or ("hk" if _is_hk_market(stock_code) else "us" if is_us_symbol else None),
                 currency=str(ticker_info.get("currency") or "").upper() or None,
                 data_quality="partial" if missing_fields else "ok",
@@ -934,7 +1033,8 @@ class YfinanceFetcher(BaseFetcher):
                 circ_mv=None,
             )
 
-            logger.info(f"[Yfinance] 获取 {symbol} 实时行情成功: 价格={price}")
+            quote = _with_yahoo_quote_metadata(quote, ticker_info)
+            logger.info(f"[Yfinance] 获取 {symbol} 行情成功: 价格={quote.price}")
             return quote
 
         except Exception as e:

@@ -104,6 +104,7 @@ class RealtimeSource(Enum):
     STOOQ = "stooq"                 # Stooq 美股兜底
     LONGBRIDGE = "longbridge"       # 长桥（美股/港股兜底）
     FUTU = "futu"                   # 富途 OpenD（港股）
+    YFINANCE = "yfinance"           # Yahoo Finance；质量与来源独立标记
     FALLBACK = "fallback"           # 降级兜底
 
 
@@ -132,6 +133,11 @@ class UnifiedRealtimeQuote:
     data_quality: Optional[str] = None           # ok/partial/unavailable
     missing_fields: Optional[list[str]] = None   # provider 缺失的关键字段
     
+    quote_session: Optional[str] = None          # intraday/close/daily/unknown
+    extended_price: Optional[float] = None       # 盘前/盘后价，独立于常规时段 OHLC
+    extended_timestamp: Optional[str] = None     # 盘前/盘后行情的真实时间
+    extended_session: Optional[str] = None       # premarket/postmarket
+
     # === 核心价格数据（几乎所有源都有）===
     price: Optional[float] = None           # 最新价
     change_pct: Optional[float] = None      # 涨跌幅(%)
@@ -172,6 +178,7 @@ class UnifiedRealtimeQuote:
         optional_fields = [
             'fetched_at', 'provider_timestamp', 'is_stale', 'stale_seconds',
             'fallback_from', 'market', 'currency', 'data_quality', 'missing_fields',
+            'quote_session', 'extended_price', 'extended_timestamp', 'extended_session',
             'price', 'change_pct', 'change_amount', 'volume', 'amount',
             'volume_ratio', 'turnover_rate', 'amplitude',
             'open_price', 'high', 'low', 'pre_close',

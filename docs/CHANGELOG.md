@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [修复] 美股大盘按交易所日历选择最近已完成交易日日线，常规收盘前不使用当日未完成行情；标题、模型输入、模板及结构化载荷共享行情日期和当前 market_phase，明确未知时间与日历降级，覆盖盘前、盘中、提前收盘及中英文回归。
+- [改进] 明确 429/503 时不立即对同一模型再发非流式请求，按去重后的现有模型顺序有界回退；解析失败不触发字段补全。契约自洽的 partial 报告是有效结果，零成功、缺文件、运行身份或计数错误仍验收失败，不要求每轮全股票池成功。
+- [改进] 美股日报使用 America/New_York 工作日 18:30 原生时区调度，未配置的 Actions 默认 full/us/zh，保留手动模式、变量及 Secret 优先级、交易日检查和通知。
+- [修复] Yahoo 报价区分常规与盘前盘后时段，保留 provider 时间、币种和来源；行情表使用同一价格基准复算涨跌幅，缺失时间明确披露，默认与 Jinja 报告共用质量说明并修正美股价格字段的元标注。
+- [新功能] 保留 analysis-reports-* 与 30 天保存期，增加公开 JSON、完整股票池覆盖及失败分类、reports/latest/ 固定路径和运行身份验证，覆盖不足的运行不再误报完整成功。
+- [测试] 补充 DST、手动模式、股票池优先级、报价口径、36 只完整/部分/全败与隐私回归，现有 CI 步骤摘要展示合成报告证据；同步中英文指南与美股日报读取手册。
+
 - [修复] 自选及其他无关配置保存不再被已有 LLM 渠道或模型错误阻断，模型相关修改仍校验完整依赖；仅更新自选时保留运行时单例与容器环境覆盖，并补齐增删、删空和校验回归。凡本次保存会启用 Agent 路径的，同样校验完整模型依赖：切到 LiteLLM Agent 后端（`AGENT_BACKEND` / `AGENT_GENERATION_BACKEND` 解析为 litellm）、开启 Agent 分析（`AGENT_MODE=true`）、或配置了非 `all` 的 `AGENT_SKILLS`——后两者走普通分析的 Agent 分支，自带 `LLMToolAdapter`，不受 `AGENT_BACKEND` 决定。仅关闭 `AGENT_MODE`、将 `AGENT_SKILLS` 设为 `all` 或空值、以及无关键保存仍不受 LLM 配置影响；显式保存或导入已退役的 `codex_app_server` 仍被拒绝。
 - [改进] 移除实验性 Codex App Server 问股后端及专属探针、取消与启动链；旧配置明确提示退役并可主动修正，保留默认 LiteLLM、会话接受事务及独立 Codex CLI 报告。
 - [修复] Agent 状态面板在缺少可用主模型时显示中英文配置指引，保留技术错误码；配置指南明确区分已移除后端与历史 Gate 记录。
