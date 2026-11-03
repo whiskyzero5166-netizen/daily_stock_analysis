@@ -11,6 +11,7 @@
 """
 
 import logging
+from pathlib import Path
 import inspect
 import re
 from dataclasses import dataclass, field
@@ -322,6 +323,15 @@ def run_market_review(
                     markdown_report,
                     report_filename
                 )
+                if filepath and Path(filepath).is_file():
+                    from src.services.report_run_context import write_market_summary
+                    try:
+                        write_market_summary(filepath, market_review_payload)
+                    except (OSError, ValueError, TypeError):
+                        # Keep existing report delivery. The Actions publisher
+                        # rejects a missing/invalid sidecar instead of claiming
+                        # the structured contract passed.
+                        logger.exception("Public market-summary export failed")
                 logger.info(
                     "[MarketReview] component=market_review action=save_report "
                     "trigger_source=%s query_id=%s region=%s path=%s",

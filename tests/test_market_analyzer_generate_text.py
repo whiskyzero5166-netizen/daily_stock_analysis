@@ -134,6 +134,44 @@ class TestAnalyzerGenerateText:
             analyzer._config_override = cfg
             return analyzer
 
+    @pytest.mark.parametrize("status", [429, 503])
+    @pytest.mark.parametrize("wrapped", [False, True])
+    def test_capacity_failure_does_not_retry_same_model_as_non_stream(self, status, wrapped):
+        analyzer = self._make_analyzer()
+        primary, fallback = "provider/primary-model", "provider/fallback-model"
+        analyzer._config_override = SimpleNamespace(
+            litellm_model=primary,
+            litellm_fallback_models=[primary, fallback, fallback],
+            llm_model_list=[],
+        )
+        calls = []
+
+        def broken_stream():
+            error = RuntimeError(f"HTTP {status}: provider capacity unavailable")
+            error.status_code = status
+            raise error
+            yield  # pragma: no cover
+
+        def dispatch(model, call_kwargs, **kwargs):
+            calls.append((model, bool(call_kwargs.get("stream"))))
+            if model == primary:
+                if wrapped:
+                    return broken_stream()
+                error = RuntimeError(f"HTTP {status}: provider capacity unavailable")
+                error.status_code = status
+                raise error
+            return iter([SimpleNamespace(
+                choices=[SimpleNamespace(delta=SimpleNamespace(content="fallback response"))],
+                usage=None,
+            )])
+
+        with patch.object(analyzer, "_dispatch_litellm_completion", side_effect=dispatch):
+            text, model, usage = analyzer._call_litellm(
+                "synthetic prompt", {"max_tokens": 64}, stream=True,
+            )
+        assert text == "fallback response" and model == fallback
+        assert calls == [(primary, True), (fallback, True)]
+
     def test_legacy_market_group_normalizes_supported_markets(self):
         from src.analyzer import _legacy_market_group
 
@@ -3028,14 +3066,8 @@ class TestAnalyzerGenerateText:
 
         assert exc_info.value.last_response_text == "这不是 JSON 格式的响应"
 
-    def test_analyze_all_models_invalid_json_goes_through_post_processing(self):
-        """When all models return non-JSON, analyze() must still run integrity
-        checks, placeholder fill, and persist_llm_usage — no early return.
-
-        With report_integrity_retry=1, the retry loop runs once (re-prompting
-        with complement instructions); when that also yields invalid JSON the
-        exhausted-retries path fires placeholder fill.
-        """
+    def test_analyze_invalid_json_stays_failed_without_integrity_reprompt(self):
+        """Invalid JSON remains failed, preserves usage, and never enters field-completion retries."""
         from src.analyzer import AnalysisResult, _AllModelsFailedError
 
         analyzer = self._make_analyzer()
@@ -3047,7 +3079,7 @@ class TestAnalyzerGenerateText:
             llm_temperature=0.7,
             llm_model_list=[],
             report_integrity_enabled=True,
-            report_integrity_retry=1,
+            report_integrity_retry=99,
         )
 
         # _parse_response on non-JSON text produces a text fallback result
@@ -3089,16 +3121,13 @@ class TestAnalyzerGenerateText:
                 news_context="some news",
             )
 
-        # _call_litellm called twice: initial + 1 retry
-        assert mock_call.call_count == 2
+        # An invalid response is not re-prompted, even with a high configured integrity limit.
+        assert mock_call.call_count == 1
 
-        # _parse_response called twice (initial + retry)
-        assert mock_parse.call_count == 2
+        assert mock_parse.call_count == 1
         mock_parse.assert_called_with("这不是 JSON，而是纯文本分析结果", "600519", "贵州茅台")
 
-        # Placeholder fill was applied after retry exhaustion
-        mock_fill.assert_called_once()
-        assert "dashboard.core_conclusion.one_sentence" in mock_fill.call_args[0][1]
+        mock_fill.assert_not_called()
 
         # persist_llm_usage was called with the last model and usage
         mock_usage.assert_called_once()
@@ -4007,7 +4036,10 @@ class TestMarketAnalyzerBypassFix:
 
         assert "## 2026-03-05 大盘复盘" in result
         assert "### 一、盘面总览" in result
-        assert "今日美股市场整体呈现**小幅下跌**态势" in result
+        assert "可用信息对应的美股市场整体呈现**小幅下跌**态势" in result
+        assert "所列已完成日线对应的" not in result
+        assert "今日美股市场整体呈现" not in result
+        assert "market_phase：unknown" in result
         assert "### 6. Strategy Framework" not in result
         assert "### 六、策略框架" in result
         assert "### 1. Market Summary" not in result

@@ -104,6 +104,7 @@ class RealtimeSource(Enum):
     STOOQ = "stooq"                 # Stooq 美股兜底
     LONGBRIDGE = "longbridge"       # 长桥（美股/港股兜底）
     FUTU = "futu"                   # 富途 OpenD（港股）
+    YFINANCE = "yfinance"           # Yahoo Finance；质量与来源独立标记
     FALLBACK = "fallback"           # 降级兜底
 
 
@@ -124,7 +125,7 @@ class UnifiedRealtimeQuote:
     # === 数据质量元数据（由 DataFetcherManager 统一补齐）===
     fetched_at: Optional[str] = None             # 本系统获取时间（ISO 8601 datetime）
     provider_timestamp: Optional[str] = None     # Provider 真实行情时间（ISO 8601 datetime）
-    is_stale: Optional[bool] = None              # provider_timestamp 超过最小 TTL 阈值时为 True
+    is_stale: Optional[bool] = None              # 美股按交易时段判断；其他市场保留 TTL 口径
     stale_seconds: Optional[int] = None          # provider_timestamp 距 fetched_at 的秒数
     fallback_from: Optional[str] = None          # 整源 fallback 的失败首选源 token
     market: Optional[str] = None                 # 市场标签（cn/hk/us/jp/kr/tw）
@@ -132,6 +133,13 @@ class UnifiedRealtimeQuote:
     data_quality: Optional[str] = None           # ok/partial/unavailable
     missing_fields: Optional[list[str]] = None   # provider 缺失的关键字段
     
+    quote_session: Optional[str] = None          # intraday/close/daily/unknown
+    quote_session_date: Optional[str] = None     # 供应商报价所在交易日（市场本地日期）
+    freshness: Optional[str] = None              # 时段新鲜度，独立于 data_quality / 缺失字段
+    extended_price: Optional[float] = None       # 盘前/盘后价，独立于常规时段 OHLC
+    extended_timestamp: Optional[str] = None     # 盘前/盘后行情的真实时间
+    extended_session: Optional[str] = None       # premarket/postmarket
+
     # === 核心价格数据（几乎所有源都有）===
     price: Optional[float] = None           # 最新价
     change_pct: Optional[float] = None      # 涨跌幅(%)
@@ -172,6 +180,7 @@ class UnifiedRealtimeQuote:
         optional_fields = [
             'fetched_at', 'provider_timestamp', 'is_stale', 'stale_seconds',
             'fallback_from', 'market', 'currency', 'data_quality', 'missing_fields',
+            'quote_session', 'quote_session_date', 'freshness', 'extended_price', 'extended_timestamp', 'extended_session',
             'price', 'change_pct', 'change_amount', 'volume', 'amount',
             'volume_ratio', 'turnover_rate', 'amplitude',
             'open_price', 'high', 'low', 'pre_close',

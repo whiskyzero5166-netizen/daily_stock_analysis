@@ -17,7 +17,7 @@ import re
 import threading
 import time
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from typing import List, Dict, Any, Optional, Tuple
@@ -44,6 +44,7 @@ from src.data.stock_mapping import (
     foreign_stock_english_aliases,
 )
 from src.services.run_diagnostics import record_provider_run, record_provider_run_started
+from src.services.news_provenance import deduplicate_news, primary_source
 
 logger = logging.getLogger(__name__)
 
@@ -243,6 +244,9 @@ class SearchResult:
     relevance_category: Optional[str] = None
     relevance_reasons: Optional[List[str]] = None
     retrieved_at: Optional[str] = None  # 首次实际检索完成时间（UTC）；缓存读取不刷新
+    search_provider: Optional[str] = None
+    search_providers: Optional[List[str]] = None
+    original_published_date: Optional[str] = None
     
     def to_text(self) -> str:
         """转换为文本格式"""
@@ -255,7 +259,10 @@ class SearchResult:
         if self.relevance_reasons:
             relevance_parts.append(f"依据: {'；'.join(self.relevance_reasons[:3])}")
         relevance_str = f"\n关联度: {'; '.join(relevance_parts)}" if relevance_parts else ""
-        return f"【{self.source}】{self.title}{date_str}\n{self.snippet}{relevance_str}"
+        return (f"【{self.source}】{self.title}{date_str}\n{self.snippet}{relevance_str}"
+                f"\nURL: {self.url}; search provider: {self.search_provider or 'unknown'}; "
+                f"publication: {self.original_published_date or self.published_date or 'unknown'}; "
+                "verification: unverified (search text, not independently checked)")
 
 
 @dataclass 
@@ -267,11 +274,17 @@ class SearchResponse:
     success: bool = True
     error_message: Optional[str] = None
     search_time: float = 0.0  # 搜索耗时（秒）
+    deduplicated_count: int = 0
     
     def mark_retrieved(self) -> None:
         """Record actual acquisition once; preserve timestamps on cached/copied results."""
         retrieved_at = datetime.now(timezone.utc).isoformat()
         for result in self.results:
+            if result.search_provider is None:
+                result.search_provider = self.provider
+            result.search_providers = list(dict.fromkeys((result.search_providers or []) + [result.search_provider]))
+            if result.original_published_date is None:
+                result.original_published_date = result.published_date
             if result.retrieved_at is None:
                 result.retrieved_at = retrieved_at
 
@@ -3348,16 +3361,11 @@ class SearchService:
                 add_reason("未命中股票代码或公司全称，降级为背景新闻")
 
         score = max(0, min(100, score))
-        return SearchResult(
-            title=item.title,
-            snippet=item.snippet,
-            url=item.url,
-            source=item.source,
-            published_date=item.published_date,
+        return replace(
+            item,
             relevance_score=score,
             relevance_category=category,
             relevance_reasons=reasons,
-            retrieved_at=item.retrieved_at,
         )
 
     @classmethod
@@ -3375,6 +3383,7 @@ class SearchService:
         if not response.success or not response.results:
             return response
 
+        response.mark_retrieved()
         scored_results = [
             cls._score_news_relevance(item, stock_code=stock_code, stock_name=stock_name)
             for item in response.results
@@ -3382,7 +3391,7 @@ class SearchService:
 
         indexed_results = list(enumerate(scored_results))
 
-        def sort_key(entry: Tuple[int, SearchResult]) -> Tuple[int, int, int, int]:
+        def sort_key(entry: Tuple[int, SearchResult]) -> tuple:
             index, result = entry
             category = result.relevance_category or cls._SECTOR_NEWS_CATEGORY
             category_rank = cls._NEWS_CATEGORY_PRIORITY.get(category, 9)
@@ -3390,9 +3399,10 @@ class SearchService:
             if not prefer_chinese:
                 language_rank = 0
             score = result.relevance_score or 0
-            return (category_rank, language_rank, -score, index)
+            primary_rank = 0 if primary_source(result.url) and result.published_date else 1
+            return (category_rank, primary_rank, language_rank, -score, index)
 
-        ranked_results = [result for _, result in sorted(indexed_results, key=sort_key)]
+        ranked_results = deduplicate_news([result for _, result in sorted(indexed_results, key=sort_key)])
         limited_results = ranked_results[:max_results]
         category_counts = {
             cls._DIRECT_NEWS_CATEGORY: 0,
@@ -3711,17 +3721,7 @@ class SearchService:
             if published is None:
                 if keep_unknown:
                     filtered.append(
-                        SearchResult(
-                            title=item.title,
-                            snippet=item.snippet,
-                            url=item.url,
-                            source=item.source,
-                            published_date=item.published_date,
-                            relevance_score=item.relevance_score,
-                            relevance_category=item.relevance_category,
-                            relevance_reasons=item.relevance_reasons,
-                            retrieved_at=item.retrieved_at,
-                        )
+                        replace(item)
                     )
                     if len(filtered) >= max_results:
                         break
@@ -3736,16 +3736,9 @@ class SearchService:
                 continue
 
             filtered.append(
-                SearchResult(
-                    title=item.title,
-                    snippet=item.snippet,
-                    url=item.url,
-                    source=item.source,
+                replace(
+                    item,
                     published_date=published.isoformat(),
-                    relevance_score=item.relevance_score,
-                    relevance_category=item.relevance_category,
-                    relevance_reasons=item.relevance_reasons,
-                    retrieved_at=item.retrieved_at,
                 )
             )
             if len(filtered) >= max_results:
@@ -3788,18 +3781,11 @@ class SearchService:
         for item in response.results[:max_results]:
             normalized_date = self._normalize_news_publish_date(item.published_date)
             normalized_results.append(
-                SearchResult(
-                    title=item.title,
-                    snippet=item.snippet,
-                    url=item.url,
-                    source=item.source,
+                replace(
+                    item,
                     published_date=(
                         normalized_date.isoformat() if normalized_date is not None else item.published_date
                     ),
-                    relevance_score=item.relevance_score,
-                    relevance_category=item.relevance_category,
-                    relevance_reasons=item.relevance_reasons,
-                    retrieved_at=item.retrieved_at,
                 )
             )
 
@@ -4633,6 +4619,14 @@ class SearchService:
             # 短暂延迟避免请求过快
             time.sleep(0.5)
         
+        # Merge overlapping articles after the existing bounded provider calls.
+        # Do not spend another request to replace removed duplicate results.
+        unique = deduplicate_news([item for response in results.values() if response.success for item in response.results])
+        retained = {id(item) for item in unique}
+        for response in results.values():
+            previous = len(response.results)
+            response.results = [item for item in response.results if id(item) in retained]
+            response.deduplicated_count += previous - len(response.results)
         return results
     
     def format_intel_report(self, intel_results: Dict[str, SearchResponse], stock_name: str) -> str:
@@ -4678,6 +4672,8 @@ class SearchService:
                     # 如果摘要太短，可能信息量不足
                     snippet = r.snippet[:150] if len(r.snippet) > 20 else r.snippet
                     lines.append(f"     {snippet}...")
+                    providers = ', '.join(r.search_providers or []) or r.search_provider or resp.provider
+                    lines.append(f"     URL: {r.url}; search providers: {providers}; publication: {r.original_published_date or r.published_date or 'unknown'}; verification: unverified")
                     if r.relevance_category or r.relevance_reasons:
                         relevance_parts = []
                         if r.relevance_category:
@@ -4687,6 +4683,8 @@ class SearchService:
                         if r.relevance_reasons:
                             relevance_parts.append(f"依据: {'；'.join(r.relevance_reasons[:3])}")
                         lines.append(f"     关联度: {'; '.join(relevance_parts)}")
+            elif resp.deduplicated_count:
+                lines.append("  重复来源已合并到前述证据，不代表未执行检索。")
             else:
                 lines.append("  未找到相关信息")
         
