@@ -64,6 +64,7 @@ from src.agent.news_evidence import (
     get_current_news_evidence,
     reset_news_evidence_scope,
 )
+from src.services.report_renderer import classify_analysis_failure, write_analysis_summary
 from src.services.empty_news import news_evidence_present
 from src.formatters import strip_hidden_markdown_metadata
 from src.phase_decision_guardrail import apply_phase_decision_guardrails
@@ -680,6 +681,7 @@ class StockAnalysisPipeline:
 
             # Step 4: 多维度情报搜索（最新消息+风险排查+业绩预期）
             news_context = None
+            news_items = []
             persisted_intelligence_context = self._load_persisted_intelligence_context(
                 code=code,
                 stock_name=stock_name,
@@ -706,7 +708,10 @@ class StockAnalysisPipeline:
 
                 # 格式化情报报告
                 if intel_results:
+                    news_items = [item for response in intel_results.values() if response.success for item in response.results]
                     news_context = self.search_service.format_intel_report(intel_results, stock_name)
+                    news_context += ("\n重大财务事实仅可依据带日期的原始公司公告或监管披露。搜索摘要和模型文字不等于独立核验。"
+                                     "对未核实的财报、指引、并购、共识和估值必须标注未核实；旧指引有较新披露时不能称为最新指引。保留来源URL、发布时间和实际搜索供应商。")
                     total_results = sum(
                         len(r.results) for r in intel_results.values() if r.success
                     )
@@ -849,6 +854,8 @@ class StockAnalysisPipeline:
                 )
                 llm_duration_ms = int((time.monotonic() - llm_started_at) * 1000)
                 if result is not None:
+                    from src.services.news_provenance import financial_evidence, label_financial_claims
+                    label_financial_claims(result, financial_evidence(news_items))
                     # 交给展示层区分「未配置渠道」「检索零命中」和「正常命中」。
                     # 该值此前只进了诊断快照，报告层拿不到。
                     result.news_result_count = news_result_count
@@ -1050,6 +1057,10 @@ class StockAnalysisPipeline:
             enhanced['realtime'] = {
                 'name': getattr(realtime_quote, 'name', ''),
                 'price': getattr(realtime_quote, 'price', None),
+                **{key: getattr(realtime_quote, key, None) for key in (
+                    'pre_close', 'currency', 'market', 'data_quality', 'missing_fields',
+                    'quote_session', 'extended_price', 'extended_timestamp', 'extended_session',
+                )},
                 'change_pct': getattr(realtime_quote, 'change_pct', None),
                 'volume_ratio': volume_ratio,
                 'volume_ratio_desc': self._describe_volume_ratio(volume_ratio) if volume_ratio else '无数据',
@@ -1064,6 +1075,8 @@ class StockAnalysisPipeline:
                 'provider_timestamp': getattr(realtime_quote, 'provider_timestamp', None),
                 'is_stale': getattr(realtime_quote, 'is_stale', None),
                 'stale_seconds': getattr(realtime_quote, 'stale_seconds', None),
+                'quote_session_date': getattr(realtime_quote, 'quote_session_date', None),
+                'freshness': getattr(realtime_quote, 'freshness', None),
                 'fallback_from': getattr(realtime_quote, 'fallback_from', None),
             }
             # 移除 None 值以减少上下文大小
@@ -1105,9 +1118,8 @@ class StockAnalysisPipeline:
                 if enhanced.get('yesterday') and isinstance(enhanced['yesterday'], dict):
                     yesterday_close = enhanced['yesterday'].get('close')
                 orig_today = enhanced.get('today') or {}
-                market_today = get_market_now(
-                    get_market_for_stock(normalize_stock_code(enhanced.get('code', '')))
-                ).date().isoformat()
+                quote_market = get_market_for_stock(normalize_stock_code(enhanced.get('code', '')))
+                market_today = get_market_now(quote_market).date().isoformat()
                 source = getattr(realtime_quote, 'source', None)
                 source_name = getattr(source, 'value', source)
                 source_name = str(source_name) if source_name is not None else 'unknown'
@@ -1121,9 +1133,21 @@ class StockAnalysisPipeline:
                 pct = getattr(realtime_quote, 'change_pct', None)
                 fetched_at = getattr(realtime_quote, 'fetched_at', None)
                 provider_timestamp = getattr(realtime_quote, 'provider_timestamp', None)
+                # A fetch at 18:30 is not proof that the quote belongs to today.
+                if quote_market == 'us':
+                    market_today = orig_today.get('date') or enhanced.get('date') or 'unknown'
+                if quote_market == 'us' and isinstance(provider_timestamp, str):
+                    try:
+                        quote_time = datetime.fromisoformat(provider_timestamp.replace('Z', '+00:00'))
+                        if quote_time.tzinfo is not None:
+                            market_tz = get_market_now(quote_market).tzinfo
+                            market_today = quote_time.astimezone(market_tz).date().isoformat()
+                    except (ValueError, TypeError):
+                        pass
                 fallback_from = getattr(realtime_quote, 'fallback_from', None)
                 realtime_today = {
                     'close': price,
+                    'pre_close': getattr(realtime_quote, 'pre_close', None),
                     'open': open_p,
                     'high': high_p,
                     'low': low_p,
@@ -1157,7 +1181,7 @@ class StockAnalysisPipeline:
                 if fallback_from is not None:
                     realtime_today['fallback_from'] = fallback_from
                 realtime_owned_fields = {
-                    'open', 'high', 'low', 'close',
+                    'open', 'high', 'low', 'close', 'pre_close',
                     'volume', 'amount', 'pct_chg', 'pctChg',
                     'date', 'data_source', 'dataSource', 'source',
                     'realtime_source', 'realtimeSource',
@@ -1174,9 +1198,13 @@ class StockAnalysisPipeline:
                     price, trend_result.ma5, trend_result.ma10, trend_result.ma20
                 )
                 enhanced['date'] = market_today
-                if yesterday_close is not None:
+                reference_close = getattr(realtime_quote, 'pre_close', None)
+                if reference_close is None and quote_market != 'us':
+                    reference_close = yesterday_close
+                enhanced.pop('price_change_ratio', None)
+                if reference_close is not None:
                     try:
-                        yc = float(yesterday_close)
+                        yc = float(reference_close)
                         if yc > 0:
                             enhanced['price_change_ratio'] = round(
                                 (price - yc) / yc * 100, 2
@@ -1632,6 +1660,10 @@ class StockAnalysisPipeline:
                 query_id,
                 trend_result=trend_result,
             )
+            if result is not None:
+                from src.services.news_provenance import financial_evidence, label_financial_claims
+                items = news_evidence.items if news_evidence is not None else []
+                label_financial_claims(result, financial_evidence(items))
 
             # 三态计数取自 Agent 实际消费的搜索工具结果：渠道不可用为 None（未执行
             # 检索），渠道可用则从 0 起步、拿到多少算多少。
@@ -1713,6 +1745,10 @@ class StockAnalysisPipeline:
                 if isinstance(realtime_data, dict):
                     result.current_price = realtime_data.get("price")
                     result.change_pct = realtime_data.get("change_pct")
+                    result.market_snapshot = self.analyzer._build_market_snapshot({
+                        "code": code, "realtime": realtime_data,
+                        "market_phase_context": market_phase_context or {},
+                    })
                 action_before_guardrail = getattr(result, "action", None)
                 advice_before_guardrail = getattr(result, "operation_advice", None)
                 stabilize_decision_with_structure(result, trend_result, fundamental_context)
@@ -3516,6 +3552,7 @@ class StockAnalysisPipeline:
             )
         
         results: List[AnalysisResult] = []
+        failures: Dict[str, str] = {}
         
         # 使用线程池并发处理
         # 注意：max_workers 设置较低（默认3）以避免触发反爬
@@ -3558,10 +3595,14 @@ class StockAnalysisPipeline:
                                 fallback_code=code,
                             )
                     elif result and not result.success:
+                        failures[code] = classify_analysis_failure(result.error_message)
                         logger.warning(
                             f"[{code}] 分析结果标记为失败，不计入汇总: "
                             f"{result.error_message or '未知原因'}"
                         )
+
+                    if result is None:
+                        failures[code] = "no_result"
 
                     # Issue #128: 分析间隔 - 在个股分析和大盘分析之间添加延迟
                     if idx < len(stock_codes) - 1 and analysis_delay > 0:
@@ -3573,6 +3614,7 @@ class StockAnalysisPipeline:
                         time.sleep(analysis_delay)
 
                 except Exception as e:
+                    failures[code] = classify_analysis_failure(str(e))
                     logger.error(f"[{code}] 任务执行失败: {e}")
         
         # 统计
@@ -3606,8 +3648,15 @@ class StockAnalysisPipeline:
         logger.info(f"成功: {success_count}, 失败: {fail_count}, 耗时: {elapsed_time:.2f} 秒")
         
         # 保存报告到本地文件（无论是否推送通知都保存）
-        if results and not dry_run:
-            self._save_local_report(results, report_type)
+        if not dry_run:
+            report_path = self._save_local_report(results, report_type)
+            if report_path:
+                try:
+                    write_analysis_summary(report_path, results, stock_codes, failures)
+                except (OSError, ValueError, TypeError) as exc:
+                    # Keep report/notification delivery; the artifact gate rejects missing JSON.
+                    self._last_local_report_error = "public_summary_save_failed"
+                    logger.error("公开报告摘要保存失败 (%s)，继续现有通知流程", type(exc).__name__)
 
         # 发送通知（单股推送模式下跳过汇总推送，避免重复）
         if results and send_notification and not dry_run:

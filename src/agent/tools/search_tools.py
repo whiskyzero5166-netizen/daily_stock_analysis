@@ -128,7 +128,8 @@ def _handle_search_stock_news(stock_code: str, stock_name: str) -> dict:
             "error": response.error_message,
         }
 
-    record_news_evidence(len(response.results))
+    response.mark_retrieved()
+    record_news_evidence(len(response.results), response.results)
 
     _persist_news_response(
         stock_code=stock_code,
@@ -206,12 +207,15 @@ def _handle_search_comprehensive_intel(stock_code: str, stock_name: str) -> dict
 
     # 本次真正交给 Agent 的证据条数，按维度累计后一次性记录。
     evidence_count = 0
+    evidence_items = []
 
     # Also return structured data
     dimensions = {}
     for dim_name, response in intel_results.items():
         if response and response.success:
+            response.mark_retrieved()
             evidence_count += len(response.results)
+            evidence_items.extend(response.results)
             _persist_news_response(
                 stock_code=stock_code,
                 stock_name=query_name,
@@ -226,12 +230,16 @@ def _handle_search_comprehensive_intel(stock_code: str, stock_name: str) -> dict
                         "title": r.title,
                         "snippet": r.snippet,
                         "source": r.source,
+                        "url": r.url,
+                        "published_date": r.original_published_date or r.published_date,
+                        "search_provider": r.search_provider,
+                        "verification_status": "unverified",
                     }
                     for r in response.results[:3]  # limit to 3 per dimension to save tokens
                 ],
             }
 
-    record_news_evidence(evidence_count)
+    record_news_evidence(evidence_count, evidence_items)
 
     return {
         "report": report,

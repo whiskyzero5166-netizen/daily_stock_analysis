@@ -615,6 +615,53 @@ def build_market_phase_context(
     )
 
 
+def classify_us_quote_freshness(provider_time, fetched_time, quote_session, ttl=600):
+    """Judge session coverage separately from field completeness and quote age.
+
+    A regular close stays current overnight, over weekends/holidays and before
+    the next open. It stops being a current quote once regular trading resumes.
+    No date or price is invented when a calendar or aware timestamp is missing.
+    """
+    result = {"is_stale": None, "freshness": "unknown", "quote_session_date": None}
+    if (not isinstance(provider_time, datetime) or not isinstance(fetched_time, datetime)
+            or provider_time.tzinfo is None or fetched_time.tzinfo is None
+            or not _XCALS_AVAILABLE):
+        return result
+    context = build_market_phase_context(market="us", current_time=fetched_time)
+    completed = resolve_historical_daily_bar_date("us", context.session_date, context.phase.value)
+    if context.phase == MarketPhase.UNKNOWN or completed is None:
+        return result
+    local_quote = get_market_now("us", current_time=provider_time)
+    result["quote_session_date"] = local_quote.date().isoformat()
+    if provider_time > fetched_time + timedelta(minutes=1):
+        return {**result, "is_stale": True, "freshness": "future_timestamp"}
+    try:
+        cal = xcals.get_calendar("XNYS")
+        if not cal.is_session(local_quote.date()):
+            return {**result, "is_stale": True, "freshness": "non_session_timestamp"}
+        close = _as_market_datetime(cal.session_close(local_quote.date()), "America/New_York")
+        open_time = _as_market_datetime(cal.session_open(local_quote.date()), "America/New_York")
+        if close is None or open_time is None:
+            return result
+        if quote_session == "close":
+            # Providers can timestamp the final regular quote a few minutes
+            # after the official (including early) close. Never accept an
+            # arbitrary intraday or extended-hours price as a completed close.
+            at_close = close - timedelta(minutes=5) <= local_quote <= close + timedelta(minutes=15)
+            active = context.phase in {MarketPhase.INTRADAY, MarketPhase.CLOSING_AUCTION}
+            current = local_quote.date() == completed and at_close and not active
+            reason = "latest_completed_close" if current else "outdated_or_unconfirmed_close"
+            return {**result, "is_stale": not current, "freshness": reason}
+        if quote_session in {"intraday", "premarket", "postmarket"}:
+            if quote_session == "intraday" and not open_time <= local_quote < close:
+                return {**result, "is_stale": True, "freshness": "session_timestamp_mismatch"}
+            stale = (fetched_time - provider_time).total_seconds() > ttl
+            return {**result, "is_stale": stale, "freshness": "outdated_quote" if stale else quote_session}
+    except (ValueError, TypeError, KeyError, OverflowError):
+        return result
+    return result
+
+
 def get_open_markets_today() -> Set[str]:
     """
     Get markets that are open today (by each market's local timezone).

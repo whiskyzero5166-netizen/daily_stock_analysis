@@ -2427,6 +2427,21 @@ class DataFetcherManager:
         ttl = realtime_cache_ttl if realtime_cache_ttl is not None else 600
         setattr(quote, "stale_seconds", stale_seconds)
         setattr(quote, "is_stale", stale_seconds > int(ttl))
+        if getattr(quote, "market", None) == "us":
+            from src.core.trading_calendar import classify_us_quote_freshness
+
+            freshness = classify_us_quote_freshness(
+                provider_dt, fetched_dt, getattr(quote, "quote_session", None), int(ttl),
+            )
+            for key, value in freshness.items():
+                setattr(quote, key, value)
+            if freshness["freshness"] == "unknown":
+                missing = list(getattr(quote, "missing_fields", None) or [])
+                if "session_calendar_or_timestamp" not in missing:
+                    missing.append("session_calendar_or_timestamp")
+                setattr(quote, "missing_fields", missing)
+                if getattr(quote, "data_quality", None) == "ok":
+                    setattr(quote, "data_quality", "partial")
         return quote
     
     def get_realtime_quote(self, stock_code: str, *, log_final_failure: bool = True,

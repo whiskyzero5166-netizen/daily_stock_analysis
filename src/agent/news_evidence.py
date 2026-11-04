@@ -30,8 +30,9 @@ class NewsEvidenceAccumulator:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._total = 0
+        self._items = []
 
-    def record(self, count: int) -> None:
+    def record(self, count: int, items=None) -> None:
         """记录一次搜索工具真实返回的条数；零命中也必须记录（记 0）。"""
         try:
             value = int(count)
@@ -41,6 +42,12 @@ class NewsEvidenceAccumulator:
             value = 0
         with self._lock:
             self._total += value
+            self._items.extend(items or [])
+
+    @property
+    def items(self):
+        with self._lock:
+            return list(self._items)
 
     @property
     def total(self) -> int:
@@ -86,7 +93,7 @@ def reset_news_evidence_scope(token: Optional[Token]) -> None:
         logger.warning("news evidence scope reset failed: %s", exc)
 
 
-def record_news_evidence(count: int) -> None:
+def record_news_evidence(count: int, items=None) -> None:
     """供 Agent 搜索工具调用。
 
     没有活动作用域时静默忽略：非 Agent 路径自己直接维护计数，工具也可能在
@@ -96,4 +103,4 @@ def record_news_evidence(count: int) -> None:
     accumulator = _CURRENT_ACCUMULATOR.get()
     if accumulator is None:
         return
-    accumulator.record(count)
+    accumulator.record(count, items)
