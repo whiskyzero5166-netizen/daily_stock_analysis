@@ -813,6 +813,7 @@ def _save_reused_market_review_report(
     config: Config,
     trigger_source: str,
     region: str,
+    market_review_payload: Optional[Dict[str, Any]] = None,
 ) -> None:
     body = str(market_report or "").strip()
     if not body:
@@ -828,6 +829,13 @@ def _save_reused_market_review_report(
         date_str = datetime.now().strftime('%Y%m%d')
         report_filename = f"market_review_{date_str}.md"
         filepath = notifier.save_report_to_file(body, report_filename)
+        if filepath and Path(filepath).is_file():
+            if isinstance(market_review_payload, dict) and market_review_payload:
+                from src.services.report_run_context import write_market_summary
+
+                write_market_summary(filepath, market_review_payload)
+            else:
+                logger.warning("复用大盘复盘缺少结构化数据，无法导出大盘摘要")
         logger.info(
             "[MarketReview] component=market_review action=save_reused_report "
             "trigger_source=%s region=%s path=%s",
@@ -1157,13 +1165,6 @@ def run_full_analysis(
                 logger.info(
                     "复盘上下文可复用，跳过重复大盘复盘并复用上下文内容。"
                 )
-                _save_reused_market_review_report(
-                    pipeline.notifier,
-                    market_report,
-                    config=config,
-                    trigger_source=review_trigger_source,
-                    region=market_review_region,
-                )
                 if (
                     market_context_generated_during_stock
                     and not merge_notification
@@ -1224,6 +1225,25 @@ def run_full_analysis(
                 market_report = _market_review_report_text(review_result)
             elif can_reuse_market_context:
                 market_report = market_context_full_report or market_context_summary
+                context_service = getattr(pipeline, "_daily_market_context_service", None)
+                reused_context = context_service.get_context(
+                    region=market_review_region,
+                    config=config,
+                    notifier=pipeline.notifier,
+                    allow_generate=False,
+                    persist_market_review_history=False,
+                    target_date=daily_market_context_target_date,
+                    current_query_id=query_id,
+                    require_query_id_match=True,
+                ) if context_service is not None else None
+                _save_reused_market_review_report(
+                    pipeline.notifier,
+                    market_report,
+                    config=config,
+                    trigger_source=review_trigger_source,
+                    region=market_review_region,
+                    market_review_payload=getattr(reused_context, "market_review_payload", None),
+                )
 
         expected_stock_report = (
             not getattr(args, "dry_run", False)
