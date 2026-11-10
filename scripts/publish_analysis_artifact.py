@@ -72,10 +72,12 @@ def publish_reports(reports_dir=None, env=None):
             run["skip_reason"] = env.get("SCHEDULE_SKIP_REASON") or "non_trading_day"
         else:
             def copy_latest(pattern, alias):
-                paths = [path for path in reports.glob(pattern) if path.is_file() and path.stat().st_size > 0]
+                paths = [path for path in reports.glob(pattern) if path.is_file()]
                 if not paths:
                     return None
                 source = max(paths, key=lambda path: path.stat().st_mtime_ns)
+                if not source.read_text(encoding="utf-8").strip():
+                    return None
                 shutil.copyfile(source, latest / alias)
                 run["files"][alias] = source.name
                 return source

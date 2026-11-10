@@ -94,6 +94,10 @@ python -m pytest tests/test_us_daily_report_contract.py -q
 
 `full` 必须有 `reports/latest/run.json`、`summary.json`、`report.md` 和 `market_review.md`；`stocks-only` 不要求大盘文件，`market-only` 不要求个股文件。大盘另附 `market_review.json`，用于验证实际行情日期、结构化指数与来源。仅有 Markdown 或绿色图标不足以确认契约通过。
 
+复用本轮大盘上下文时，沿用已经生成的结构化行情、日期和新闻数据，同时保存 Markdown 与同目录同名 JSON（仅扩展名不同），包括复盘锁未取得后的本轮缓存复用路径。整理步骤再将两者复制到 `reports/latest/`；不会为补摘要重新调用模型或搜索。上下文的结构化载荷只用于报告导出，不加入个股提示词的安全摘要。
+
+`market_summary_missing` 表示已找到大盘 Markdown，但其同名 JSON 摘要实际缺失；四个基本文件存在不代表结构化验收通过。摘要缺失、为空、无法解析、身份或交易日不一致时仍报错，Markdown 空文件或仅含空白也不能通过。不得根据正文反推或伪造缺少的结构化行情。
+
 公开 JSON 使用 `schema_version=1`，记录 workflow 路径、run ID、attempt、`source_branch`、`commit_sha`、`workflow_ref`、带时区的生成时间、冻结参考时间和 `trading_session_date`。校验器逐项比对身份、日期、配置清单、去重后的逐股状态、成功/失败计数、文件存在性，以及价格/昨收复算涨跌幅（容差 0.1 个百分点）。异常文件、身份错配或零成功均为 `failed`；真实部分成功为 `partial`，不虚构失败股票的评分。
 
 正常定时仅有一个 America/New_York 工作日 18:30 cron，沿用并发控制；不启用第二个调度器。定时分析前用 XNYS 日历检查交易日及实际收盘，节假日写入 `skipped` 清单，日历不可用则关闭本次分析并报告失败。此检查不受关闭普通交易日过滤的配置影响；手动模式与 `force_run` 的原行为保留。若 GitHub 把执行延迟至下一个开盘前，本轮会标记未到常规收盘，而不会虚构新收盘行情。

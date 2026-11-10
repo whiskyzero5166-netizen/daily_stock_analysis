@@ -72,6 +72,8 @@ class DailyMarketContext:
     history_id: Optional[int] = None
     query_id: Optional[str] = None
     full_report: Optional[str] = None
+    # Keep the original review for artifact export; never add it to prompt data.
+    market_review_payload: Dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
 
     def to_safe_dict(self) -> Dict[str, Any]:
         payload: Dict[str, Any] = {
@@ -629,6 +631,7 @@ class DailyMarketContextService:
             history_id=history_id if isinstance(history_id, int) else None,
             query_id=query_id if isinstance(query_id, str) and query_id else None,
             full_report=full_report,
+            market_review_payload=dict(scoped_payload),
         )
 
 
